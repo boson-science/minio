@@ -1,0 +1,16 @@
+{
+  "release": "FERMION.2026.09.1",
+  "upstream_base": "RELEASE.2025-10-15T17-29-55Z",
+  "console": "github.com/minio/console v1.7.6",
+  "policy": "Every applicable advisory must have a reviewed fix and a negative regression test before a FERMION tag can publish.",
+  "advisories": [
+    {"id":"GHSA-jjjj-jwhf-8rgr","status":"requires-review"},
+    {"id":"GHSA-hv4r-mvr4-25vw","status":"requires-review"},
+    {"id":"GHSA-9c4q-hq6p-c237","status":"requires-review"},
+    {"id":"GHSA-h749-fxx7-pwpg","status":"requires-review"},
+    {"id":"GHSA-3rh2-v3gr-35p9","status":"requires-review"},
+    {"id":"GHSA-jv87-32hw-hh99","status":"requires-review"},
+    {"id":"GHSA-5cx5-wh4m-82fh","status":"requires-review"},
+    {"id":"GHSA-xh8f-g2qw-gcm7","status":"requires-review"}
+  ]
+}
