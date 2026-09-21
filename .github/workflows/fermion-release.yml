@@ -16,7 +16,10 @@ concurrency:
 jobs:
   release:
     if: startsWith(github.ref_name, 'FERMION.')
-    runs-on: [self-hosted, linux, amd64]
+    # The public fork must not encode a private runner or network topology.
+    # GitHub's hosted runner is sufficient; Harbor coordinates remain protected
+    # environment variables/secrets and are never committed here.
+    runs-on: ubuntu-24.04
     environment: downstream-release
     steps:
       - uses: actions/checkout@v4
