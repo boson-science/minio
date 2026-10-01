@@ -1,9 +1,7 @@
 name: Shell formatting checks
 
 on:
-  pull_request:
-    branches:
-      - master
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,7 +9,7 @@ permissions:
 jobs:
   build:
     name: runner / shfmt
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
       - uses: actions/checkout@v4
       - uses: luizm/action-sh-checker@master

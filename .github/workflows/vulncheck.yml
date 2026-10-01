@@ -1,12 +1,9 @@
 name: VulnCheck
 on:
-  pull_request:
-    branches:
-      - master
-
   push:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: read # to fetch code (actions/checkout)
@@ -14,7 +11,7 @@ permissions:
 jobs:
   vulncheck:
     name: Analysis
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v4

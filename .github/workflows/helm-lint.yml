@@ -1,14 +1,11 @@
 name: Helm Chart linting
 
 on:
-  pull_request:
-    branches:
-      - master
+  workflow_dispatch:
 
-# This ensures that previous jobs for the PR are canceled when the PR is
-# updated.
+# Keep one manual validation per selected ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
       - name: Checkout
         uses: actions/checkout@v4

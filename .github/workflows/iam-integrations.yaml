@@ -1,14 +1,11 @@
 name: IAM integration
 
 on:
-  pull_request:
-    branches:
-      - master
+  workflow_dispatch:
 
-# This ensures that previous jobs for the PR are canceled when the PR is
-# updated.
+# Keep one manual validation per selected ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -17,7 +14,7 @@ permissions:
 jobs:
   iam-matrix-test:
     name: "[Go=${{ matrix.go-version }}|ldap=${{ matrix.ldap }}|etcd=${{ matrix.etcd }}|openid=${{ matrix.openid }}]"
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
 
     services:
       openldap:
@@ -127,7 +124,7 @@ jobs:
           make test-site-replication-oidc
   iam-import-with-missing-entities:
     name: Test IAM import in new cluster with missing entities
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -144,7 +141,7 @@ jobs:
           make test-iam-import-with-missing-entities
   iam-import-with-openid:
     name: Test IAM import in new cluster with opendid configurations
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

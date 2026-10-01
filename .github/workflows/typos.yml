@@ -1,15 +1,15 @@
 ---
 name: Spelling
-on: [pull_request]
+on:
+  workflow_dispatch:
 
 jobs:
   run:
     name: Spell Check with Typos
-    runs-on: ubuntu-latest
+    runs-on: tau-minio
     steps:
     - name: Checkout Actions Repository
       uses: actions/checkout@v4
 
     - name: Check spelling of repo
       uses: crate-ci/typos@master
-
