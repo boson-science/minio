@@ -1,11 +1,17 @@
 # @format
 
+# SECURITY: this public fork runs workflows on a self-hosted runner.
+# The upstream `issues: opened`
+# trigger let any GitHub user start a job on that runner by opening an issue,
+# so it was removed. The workflow is manual (workflow_dispatch) only.
+# NOTE: actions/add-to-project needs an issue/PR in the event payload and the
+# upstream miniohq project + BOT_PAT secret, so a manual run has nothing to
+# act on and is expected to fail. It is kept only so the file stays close to
+# upstream.
 name: Issue Workflow
 
 on:
-  issues:
-    types:
-      - opened
+  workflow_dispatch:
 
 jobs:
   add-to-project:
