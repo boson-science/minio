@@ -20,9 +20,9 @@ concurrency:
 jobs:
   release:
     if: startsWith(github.ref_name, 'RELEASE.')
-    # Releases are built on GitHub's hosted runners and published only to
-    # GitHub Container Registry; downstream users mirror from there.
-    runs-on: ubuntu-24.04
+    # Releases are published only to GitHub Container Registry; downstream
+    # users mirror from there.
+    runs-on: self-hosted
     environment: downstream-release
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # A buildx builder is needed for the provenance and SBOM attestations.
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
       - name: Validate release and advisory gate
         shell: bash
         run: |
@@ -78,9 +81,7 @@ jobs:
             --build-arg LDFLAGS="$LDFLAGS" \
             --tag "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_REF_NAME" \
             --push --provenance=true --sbom=true -f Dockerfile.downstream .
-      - name: Sign the image and publish the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sign the image and write the release manifest
         run: |
           set -euo pipefail
           image="ghcr.io/$GITHUB_REPOSITORY"
@@ -90,4 +91,9 @@ jobs:
           jq -n --arg tag "$GITHUB_REF_NAME" --arg image "$image" --arg digest "$digest" \
             --arg upstream "minio/minio@7aac2a2c" \
             '{release_tag:$tag,image:$image,digest:$digest,upstream_base:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
-          gh release create "$GITHUB_REF_NAME" release-manifest.json --verify-tag --generate-notes
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: release-manifest.json
+          generate_release_notes: true
