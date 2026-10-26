@@ -41,7 +41,6 @@ const (
 	storageRESTMethodRenameFile     = "/rfile"
 	storageRESTMethodVerifyFile     = "/vfile"
 	storageRESTMethodStatInfoFile   = "/sfile"
-	storageRESTMethodReadMultiple   = "/rmpl"
 	storageRESTMethodCleanAbandoned = "/cln"
 	storageRESTMethodDeleteBulk     = "/dblk"
 	storageRESTMethodReadParts      = "/rps"

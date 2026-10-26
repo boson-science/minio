@@ -101,7 +101,6 @@ type StorageAPI interface {
 	VerifyFile(ctx context.Context, volume, path string, fi FileInfo) (*CheckPartsResp, error)
 	StatInfoFile(ctx context.Context, volume, path string, glob bool) (stat []StatInfo, err error)
 	ReadParts(ctx context.Context, bucket string, partMetaPaths ...string) ([]*ObjectPartInfo, error)
-	ReadMultiple(ctx context.Context, req ReadMultipleReq, resp chan<- ReadMultipleResp) error
 	CleanAbandonedData(ctx context.Context, volume string, path string) error
 
 	// Write all data, syncs the data to disk.

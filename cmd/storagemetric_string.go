@@ -33,18 +33,17 @@ func _() {
 	_ = x[storageMetricReadXL-22]
 	_ = x[storageMetricReadAll-23]
 	_ = x[storageMetricStatInfoFile-24]
-	_ = x[storageMetricReadMultiple-25]
-	_ = x[storageMetricDeleteAbandonedParts-26]
-	_ = x[storageMetricDiskInfo-27]
-	_ = x[storageMetricDeleteBulk-28]
-	_ = x[storageMetricRenamePart-29]
-	_ = x[storageMetricReadParts-30]
-	_ = x[storageMetricLast-31]
+	_ = x[storageMetricDeleteAbandonedParts-25]
+	_ = x[storageMetricDiskInfo-26]
+	_ = x[storageMetricDeleteBulk-27]
+	_ = x[storageMetricRenamePart-28]
+	_ = x[storageMetricReadParts-29]
+	_ = x[storageMetricLast-30]
 }
 
-const _storageMetric_name = "MakeVolBulkMakeVolListVolsStatVolDeleteVolWalkDirListDirReadFileAppendFileCreateFileReadFileStreamRenameFileRenameDataCheckPartsDeleteDeleteVersionsVerifyFileWriteAllDeleteVersionWriteMetadataUpdateMetadataReadVersionReadXLReadAllStatInfoFileReadMultipleDeleteAbandonedPartsDiskInfoDeleteBulkRenamePartReadPartsLast"
+const _storageMetric_name = "MakeVolBulkMakeVolListVolsStatVolDeleteVolWalkDirListDirReadFileAppendFileCreateFileReadFileStreamRenameFileRenameDataCheckPartsDeleteDeleteVersionsVerifyFileWriteAllDeleteVersionWriteMetadataUpdateMetadataReadVersionReadXLReadAllStatInfoFileDeleteAbandonedPartsDiskInfoDeleteBulkRenamePartReadPartsLast"
 
-var _storageMetric_index = [...]uint16{0, 11, 18, 26, 33, 42, 49, 56, 64, 74, 84, 98, 108, 118, 128, 134, 148, 158, 166, 179, 192, 206, 217, 223, 230, 242, 254, 274, 282, 292, 302, 311, 315}
+var _storageMetric_index = [...]uint16{0, 11, 18, 26, 33, 42, 49, 56, 64, 74, 84, 98, 108, 118, 128, 134, 148, 158, 166, 179, 192, 206, 217, 223, 230, 242, 262, 270, 280, 290, 299, 303}
 
 func (i storageMetric) String() string {
 	if i >= storageMetric(len(_storageMetric_index)-1) {

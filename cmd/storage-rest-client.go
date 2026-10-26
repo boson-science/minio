@@ -912,45 +912,6 @@ func (client *storageRESTClient) StatInfoFile(ctx context.Context, volume, path 
 	return stat, toStorageErr(err)
 }
 
-// ReadMultiple will read multiple files and send each back as response.
-// Files are read and returned in the given order.
-// The resp channel is closed before the call returns.
-// Only a canceled context or network errors returns an error.
-func (client *storageRESTClient) ReadMultiple(ctx context.Context, req ReadMultipleReq, resp chan<- ReadMultipleResp) error {
-	defer xioutil.SafeClose(resp)
-	body, err := req.MarshalMsg(nil)
-	if err != nil {
-		return err
-	}
-	respBody, err := client.call(ctx, storageRESTMethodReadMultiple, nil, bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return err
-	}
-	defer xhttp.DrainBody(respBody)
-
-	pr, pw := io.Pipe()
-	go func() {
-		pw.CloseWithError(waitForHTTPStream(respBody, xioutil.NewDeadlineWriter(pw, globalDriveConfig.GetMaxTimeout())))
-	}()
-	mr := msgp.NewReader(pr)
-	defer readMsgpReaderPoolPut(mr)
-	for {
-		var file ReadMultipleResp
-		if err := file.DecodeMsg(mr); err != nil {
-			if errors.Is(err, io.EOF) {
-				err = nil
-			}
-			pr.CloseWithError(err)
-			return toStorageErr(err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case resp <- file:
-		}
-	}
-}
-
 // CleanAbandonedData will read metadata of the object on disk
 // and delete any data directories and inline data that isn't referenced in metadata.
 func (client *storageRESTClient) CleanAbandonedData(ctx context.Context, volume string, path string) error {

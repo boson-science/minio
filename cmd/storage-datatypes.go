@@ -396,28 +396,6 @@ func newFileInfo(object string, dataBlocks, parityBlocks int) (fi FileInfo) {
 	return fi
 }
 
-// ReadMultipleReq contains information of multiple files to read from disk.
-type ReadMultipleReq struct {
-	Bucket       string   `msg:"bk"`           // Bucket. Can be empty if multiple buckets.
-	Prefix       string   `msg:"pr,omitempty"` // Shared prefix of all files. Can be empty. Will be joined to filename without modification.
-	Files        []string `msg:"fl"`           // Individual files to read.
-	MaxSize      int64    `msg:"ms"`           // Return error if size is exceed.
-	MetadataOnly bool     `msg:"mo"`           // Read as XL meta and truncate data.
-	AbortOn404   bool     `msg:"ab"`           // Stop reading after first file not found.
-	MaxResults   int      `msg:"mr"`           // Stop after this many successful results. <= 0 means all.
-}
-
-// ReadMultipleResp contains a single response from a ReadMultipleReq.
-type ReadMultipleResp struct {
-	Bucket  string    `msg:"bk"`           // Bucket as given by request.
-	Prefix  string    `msg:"pr,omitempty"` // Prefix as given by request.
-	File    string    `msg:"fl"`           // File name as given in request.
-	Exists  bool      `msg:"ex"`           // Returns whether the file existed on disk.
-	Error   string    `msg:"er,omitempty"` // Returns any error when reading.
-	Data    []byte    `msg:"d"`            // Contains all data of file.
-	Modtime time.Time `msg:"m"`            // Modtime of file on disk.
-}
-
 // DeleteVersionHandlerParams are parameters for DeleteVersionHandler
 type DeleteVersionHandlerParams struct {
 	DiskID         string        `msg:"id"`
