@@ -9,10 +9,10 @@ permissions:
 jobs:
   build:
     name: runner / shfmt
-    runs-on: tau-minio
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - uses: luizm/action-sh-checker@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: luizm/action-sh-checker@883217215b11c1fabbf00eb1a9a041f62d74c744 # v0.10.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHFMT_OPTS: "-s"
