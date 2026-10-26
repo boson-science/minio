@@ -26,8 +26,17 @@ and `mc admin info` report releases exactly as upstream builds do.
 
 3. `.github/workflows/release.yml` checks the tag and the advisory gate, then
    runs the tests, `go vet` and `govulncheck`. It builds the container image
-   with the tag's ldflags, signs it, and publishes a GitHub release with a
-   `release-manifest.json`.
+   with the tag's ldflags and pushes it to `ghcr.io/boson-science/minio`. It
+   signs the image with keyless cosign and publishes a GitHub release with a
+   `release-manifest.json` that records the image digest.
+
+   To verify a release image:
+
+   ```sh
+   cosign verify ghcr.io/boson-science/minio@<digest> \
+     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     --certificate-identity-regexp '^https://github.com/boson-science/minio/.github/workflows/release.yml@refs/tags/RELEASE\.'
+   ```
 
 ## Hotfixes
 

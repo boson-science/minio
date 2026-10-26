@@ -20,9 +20,8 @@ concurrency:
 jobs:
   release:
     if: startsWith(github.ref_name, 'RELEASE.')
-    # The public fork must not encode a private runner or network topology.
-    # GitHub's hosted runner is sufficient; registry coordinates are
-    # environment secrets and are never committed here.
+    # Releases are built on GitHub's hosted runners and published only to
+    # GitHub Container Registry; downstream users mirror from there.
     runs-on: ubuntu-24.04
     environment: downstream-release
     steps:
@@ -62,50 +61,33 @@ jobs:
           # The binary must report exactly the tag being released.
           [[ "$ldflags" == *"cmd.ReleaseTag=$GITHUB_REF_NAME "* ]]
           echo "ldflags=$ldflags" >> "$GITHUB_OUTPUT"
-      - name: Build immutable linux/amd64 image
+      - name: Build and push immutable linux/amd64 image
         env:
           BUILD_BASE_DIGEST: ${{ vars.DOWNSTREAM_BUILD_BASE_DIGEST }}
           RUNTIME_BASE_DIGEST: ${{ vars.DOWNSTREAM_RUNTIME_BASE_DIGEST }}
-          HARBOR_IMAGE: ${{ secrets.DOWNSTREAM_HARBOR_IMAGE }}
-          HARBOR_REPOSITORY: ${{ vars.DOWNSTREAM_HARBOR_REPOSITORY }}
-          HARBOR_USER: ${{ secrets.DOWNSTREAM_HARBOR_ROBOT_USER }}
-          HARBOR_TOKEN: ${{ secrets.DOWNSTREAM_HARBOR_ROBOT_TOKEN }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LDFLAGS: ${{ steps.version.outputs.ldflags }}
         run: |
           set -euo pipefail
           test -n "$BUILD_BASE_DIGEST"; test -n "$RUNTIME_BASE_DIGEST"
-          test -n "$HARBOR_IMAGE"; test -n "$HARBOR_REPOSITORY"
-          harbor_host="${HARBOR_IMAGE%%/*}"
-          echo "::add-mask::$harbor_host"
-          printf '%s' "$HARBOR_TOKEN" | docker login "$harbor_host" -u "$HARBOR_USER" --password-stdin
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx build --platform linux/amd64 --pull=false \
             --build-arg BUILD_BASE="golang:1.24-alpine@$BUILD_BASE_DIGEST" \
             --build-arg RUNTIME_BASE="registry.access.redhat.com/ubi9/ubi-micro@$RUNTIME_BASE_DIGEST" \
             --build-arg RELEASE="$GITHUB_REF_NAME" \
             --build-arg LDFLAGS="$LDFLAGS" \
-            --tag "$HARBOR_IMAGE:$GITHUB_REF_NAME" \
             --tag "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_REF_NAME" \
             --push --provenance=true --sbom=true -f Dockerfile.downstream .
-      - name: Resolve and sign immutable digest
+      - name: Sign the image and publish the release
         env:
-          HARBOR_IMAGE: ${{ secrets.DOWNSTREAM_HARBOR_IMAGE }}
-          HARBOR_REPOSITORY: ${{ vars.DOWNSTREAM_HARBOR_REPOSITORY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$HARBOR_IMAGE"; test -n "$HARBOR_REPOSITORY"
-          echo "::add-mask::${HARBOR_IMAGE%%/*}"
-          ghcr_image="ghcr.io/$GITHUB_REPOSITORY"
-          digest="$(docker buildx imagetools inspect "$HARBOR_IMAGE:$GITHUB_REF_NAME" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          ghcr_digest="$(docker buildx imagetools inspect "$ghcr_image:$GITHUB_REF_NAME" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          image="ghcr.io/$GITHUB_REPOSITORY"
+          digest="$(docker buildx imagetools inspect "$image:$GITHUB_REF_NAME" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$ghcr_digest" == "$digest" ]]
-          cosign sign --yes "$HARBOR_IMAGE@$digest"
-          cosign sign --yes "$ghcr_image@$digest"
-          jq -n --arg tag "$GITHUB_REF_NAME" --arg digest "$digest" --arg ghcr_digest "$ghcr_digest" \
+          cosign sign --yes "$image@$digest"
+          jq -n --arg tag "$GITHUB_REF_NAME" --arg image "$image" --arg digest "$digest" \
             --arg upstream "minio/minio@7aac2a2c" \
-            --arg harbor_repository "$HARBOR_REPOSITORY" \
-            '{release_tag:$tag,harbor_repository:$harbor_repository,harbor_tag:$tag,harbor_digest:$digest,ghcr_digest:$ghcr_digest,upstream_base_tag:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
+            '{release_tag:$tag,image:$image,digest:$digest,upstream_base:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
           gh release create "$GITHUB_REF_NAME" release-manifest.json --verify-tag --generate-notes
