@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -43,14 +44,15 @@ func (t *ldapLoginThrottle) resetForTest(now func() time.Time) {
 	t.pairs.entries = make(map[ldapThrottleKey]*throttleEntry)
 	t.users.entries = make(map[ldapThrottleKey]*throttleEntry)
 	t.sources.entries = make(map[ldapThrottleKey]*throttleEntry)
+	t.sites.entries = make(map[ldapThrottleKey]*throttleEntry)
 	t.maxEntries = ldapThrottleMaxEntries
 	t.lastSweep = time.Time{}
 	t.now = now
 }
 
-// acquireS acquires with the same source for the pair and spray limits.
+// acquireS acquires from a source without a site level (like IPv4).
 func (t *ldapLoginThrottle) acquireS(username, source string) *ldapAttempt {
-	return t.acquire(username, ldapThrottleSource{pair: source, spray: source})
+	return t.acquire(username, ldapThrottleSource{net: source})
 }
 
 type fakeClock struct {
@@ -201,27 +203,29 @@ func TestLDAPThrottleRefund(t *testing.T) {
 	th, _ := newTestLDAPThrottle()
 	// LDAP outages do not count as failed attempts.
 	for range 3 * ldapThrottleUserPolicy.freeAttempts {
-		a := th.acquireS("alice", "10.0.0.1")
+		a := th.acquire("alice", ldapTestSourceOf("[2001:db8::1]:1"))
 		if a == nil {
 			t.Fatal("refunded attempts must not cause throttling")
 		}
 		a.notCredentialFailure()
 	}
-	if n := len(th.pairs.entries) + len(th.users.entries) + len(th.sources.entries); n != 0 {
-		t.Fatalf("refunded attempts must not leave entries, have %d", n)
+	for _, tbl := range th.tables() {
+		if n := len(tbl.entries); n != 0 {
+			t.Fatalf("refunded attempts must not leave entries, have %d", n)
+		}
 	}
 }
 
 func TestLDAPThrottleSourceIgnoresHeaders(t *testing.T) {
 	testCases := map[string]ldapThrottleSource{
-		"10.1.2.3:4567":                 {"10.1.2.3", "10.1.2.3"},
-		"[2001:db8:1:2:3:4:5:6]:9000":   {"2001:db8:1:2::/64", "2001:db8:1::/48"},
-		"[2001:db8:1:ff:ffff::1]:9000":  {"2001:db8:1:ff::/64", "2001:db8:1::/48"},
-		"[::ffff:192.0.2.1]:80":         {"192.0.2.1", "192.0.2.1"},
-		"[fe80::1%eth0]:80":             {"fe80::/64", "fe80::/48"},
-		"10.1.2.3":                      {"10.1.2.3", "10.1.2.3"},
-		"not-an-ip:80":                  {"invalid", "invalid"},
-		strings.Repeat("x", 8000) + ":": {"invalid", "invalid"},
+		"10.1.2.3:4567":                 {net: "10.1.2.3"},
+		"[2001:db8:1:2:3:4:5:6]:9000":   {net: "2001:db8:1:2::/64", site: "2001:db8:1::/48"},
+		"[2001:db8:1:ff:ffff::1]:9000":  {net: "2001:db8:1:ff::/64", site: "2001:db8:1::/48"},
+		"[::ffff:192.0.2.1]:80":         {net: "192.0.2.1"},
+		"[fe80::1%eth0]:80":             {net: "fe80::/64", site: "fe80::/48"},
+		"10.1.2.3":                      {net: "10.1.2.3"},
+		"not-an-ip:80":                  {net: "invalid"},
+		strings.Repeat("x", 8000) + ":": {net: "invalid"},
 	}
 	for remote, want := range testCases {
 		r := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -236,26 +240,58 @@ func TestLDAPThrottleSourceIgnoresHeaders(t *testing.T) {
 	}
 }
 
+func ldapTestSourceOf(remote string) ldapThrottleSource {
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.RemoteAddr = remote
+	return ldapThrottleSourceOf(r)
+}
+
 func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 	th, _ := newTestLDAPThrottle()
-	srcOf := func(remote string) ldapThrottleSource {
-		r := httptest.NewRequest(http.MethodPost, "/", nil)
-		r.RemoteAddr = remote
-		return ldapThrottleSourceOf(r)
-	}
+	perNet := ldapThrottleSourcePolicy.freeAttempts
+	perSite := ldapThrottleSitePolicy.freeAttempts
 
-	// Spraying from many /64s of one /48 is limited as one source.
-	limit := ldapThrottleSourcePolicy.freeAttempts
-	for i := range limit {
-		if th.acquire(fmt.Sprint("user", i), srcOf(fmt.Sprintf("[2001:db8:1:%x::1]:1", i))) == nil {
-			t.Fatalf("distinct user %d below the spray limit should be admitted", i)
+	// One /64 reaching its spraying limit does not block a neighbouring /64
+	// of the same /48.
+	for i := range perNet {
+		if th.acquire(fmt.Sprint("user", i), ldapTestSourceOf("[2001:db8:1:1::1]:1")) == nil {
+			t.Fatalf("distinct user %d below the /64 limit should be admitted", i)
 		}
 	}
-	if th.acquire("another", srcOf("[2001:db8:1:ffff::1]:1")) != nil {
-		t.Fatal("spraying across /64s of one /48 must be throttled")
+	if th.acquire("another", ldapTestSourceOf("[2001:db8:1:1::2]:1")) != nil {
+		t.Fatal("/64 spraying usernames must be throttled")
 	}
-	if th.acquire("another", srcOf("[2001:db8:2::1]:1")) == nil {
+	if th.acquire("another", ldapTestSourceOf("[2001:db8:1:2::1]:1")) == nil {
+		t.Fatal("a neighbouring /64 must not be throttled by the /64 limit")
+	}
+
+	// Spraying across many /64s of one /48, each below the /64 limit, is
+	// throttled once the /48 limit is reached.
+	th, _ = newTestLDAPThrottle()
+	per64 := perNet / 2
+	for i := range perSite {
+		src := ldapTestSourceOf(fmt.Sprintf("[2001:db8:1:%x::1]:1", i/per64))
+		if th.acquire(fmt.Sprint("user", i), src) == nil {
+			t.Fatalf("distinct user %d below the /48 limit should be admitted", i)
+		}
+	}
+	if th.acquire("another", ldapTestSourceOf("[2001:db8:1:ffff::1]:1")) != nil {
+		t.Fatal("spraying across /64s of one /48 must be throttled at the /48 limit")
+	}
+	if th.acquire("another", ldapTestSourceOf("[2001:db8:2::1]:1")) == nil {
 		t.Fatal("another /48 must not be throttled")
+	}
+
+	// IPv4 has no site level: the per-address limit applies.
+	th, _ = newTestLDAPThrottle()
+	for i := range perNet {
+		th.acquire(fmt.Sprint("user", i), ldapTestSourceOf("192.0.2.1:1"))
+	}
+	if th.acquire("another", ldapTestSourceOf("192.0.2.1:2")) != nil {
+		t.Fatal("IPv4 spraying must be throttled")
+	}
+	if th.acquire("another", ldapTestSourceOf("192.0.2.2:1")) == nil {
+		t.Fatal("other IPv4 addresses must not be throttled")
 	}
 
 	// The (user, source) backoff uses /64: guessing from one /64 does not
@@ -263,12 +299,12 @@ func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 	th, _ = newTestLDAPThrottle()
 	free := ldapThrottlePairPolicy.freeAttempts
 	for range free {
-		th.acquire("alice", srcOf("[2001:db8:5:1::1]:1"))
+		th.acquire("alice", ldapTestSourceOf("[2001:db8:5:1::1]:1"))
 	}
-	if th.acquire("alice", srcOf("[2001:db8:5:1::2]:1")) != nil {
+	if th.acquire("alice", ldapTestSourceOf("[2001:db8:5:1::2]:1")) != nil {
 		t.Fatal("addresses of one /64 must share the pair backoff")
 	}
-	if th.acquire("alice", srcOf("[2001:db8:5:2::1]:1")) == nil {
+	if th.acquire("alice", ldapTestSourceOf("[2001:db8:5:2::1]:1")) == nil {
 		t.Fatal("a neighbouring /64 must not share the pair backoff")
 	}
 }
@@ -285,13 +321,14 @@ func TestLDAPThrottleMemoryBound(t *testing.T) {
 		t.Fatalf("expected expired entries to be swept, have %d pairs", n)
 	}
 
-	// Huge junk usernames from many sources: tables stay bounded (plus one
-	// shared overflow entry) and keys are fixed size.
+	// Huge junk usernames from many sources: tables stay bounded (plus the
+	// overflow shards) and keys are fixed size.
 	junk := strings.Repeat("j", 8<<10)
-	for i := range 1000 {
-		th.acquireS(fmt.Sprint(junk, i), fmt.Sprint("10.2.", i/250, ".", i%250))
-		for _, tbl := range []*throttleTable{&th.pairs, &th.users, &th.sources} {
-			if len(tbl.entries) > th.maxEntries+1 {
+	for i := range 2000 {
+		src := ldapTestSourceOf(fmt.Sprintf("[2001:db8:%x:%x::1]:1", i/250, i%250))
+		th.acquire(fmt.Sprint(junk, i), src)
+		for _, tbl := range th.tables() {
+			if len(tbl.entries) > th.maxEntries+ldapThrottleOverflowShards {
 				t.Fatalf("throttle table exceeded its bound: %d", len(tbl.entries))
 			}
 		}
@@ -322,15 +359,59 @@ func TestLDAPThrottleFloodDoesNotResetCounters(t *testing.T) {
 		t.Fatal("flood must not reset an accumulating entry")
 	}
 
-	// Keys that could not be tracked share a limited overflow counter.
-	if th.acquireS("flood-new", "10.4.0.1") != nil {
-		t.Fatal("untracked keys must be limited by the shared overflow counter")
-	}
-
 	// Once entries expire there is room again for new keys.
 	clk.advance(ldapThrottleEntryTTL + ldapThrottlePairPolicy.maxDelay + ldapThrottleSweepInterval)
 	if th.acquireS("late", "10.5.0.1") == nil {
 		t.Fatal("new keys should be tracked again after entries expire")
+	}
+}
+
+func TestLDAPThrottleOverflowSharding(t *testing.T) {
+	th, _ := newTestLDAPThrottle()
+	th.maxEntries = 1
+	const src = "10.0.0.1"
+	pairShard := func(user string) int {
+		k := sha256.Sum256([]byte("pair\x00" + user + "\x00" + src))
+		return int(k[0]) % ldapThrottleOverflowShards
+	}
+
+	// Fill every table so that new pairs can only be tracked in overflow
+	// shards.
+	if th.acquireS("filler", src) == nil {
+		t.Fatal("filler attempt should be admitted")
+	}
+
+	// An attacker saturates the overflow shard of its own pair.
+	attacker := "attacker"
+	if n := failN(th, attacker, src, ldapThrottlePairPolicy.freeAttempts+5); n != ldapThrottlePairPolicy.freeAttempts {
+		t.Fatalf("expected %d admitted attempts in the overflow shard, got %d", ldapThrottlePairPolicy.freeAttempts, n)
+	}
+
+	// Untracked pairs in the same shard share the limit; pairs in other
+	// shards are unaffected.
+	var sameShard, blocked, others, admitted int
+	for i := range 640 {
+		user := fmt.Sprint("victim", i)
+		if pairShard(user) == pairShard(attacker) {
+			sameShard++
+			if th.acquireS(user, src) == nil {
+				blocked++
+			}
+			continue
+		}
+		if others < 10 {
+			others++
+			if a := th.acquireS(user, src); a != nil {
+				admitted++
+				a.notCredentialFailure()
+			}
+		}
+	}
+	if sameShard == 0 || blocked != sameShard {
+		t.Fatalf("pairs sharing the attacker's overflow shard must be limited: %d of %d blocked", blocked, sameShard)
+	}
+	if admitted != others {
+		t.Fatalf("pairs in other overflow shards must not be blocked: %d of %d admitted", admitted, others)
 	}
 }
 

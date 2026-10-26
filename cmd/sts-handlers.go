@@ -712,7 +712,7 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 	source := ldapThrottleSourceOf(r)
 	attempt := globalLDAPLoginThrottle.acquire(ldapUsername, source)
 	if attempt == nil {
-		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source.pair))
+		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source.net))
 		return
 	}
 

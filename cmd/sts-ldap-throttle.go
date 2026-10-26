@@ -36,17 +36,22 @@ import (
 //   - user: failures of one username across all sources within a fixed
 //     window. A high ceiling that caps distributed guessing.
 //   - source: distinct usernames failing from one source (password spraying).
+//   - site: distinct usernames failing from one IPv6 /48, with a much higher
+//     limit, so that rotating through /64s does not avoid the source limit
+//     while one /64 cannot block its /48 neighbours.
 var (
 	ldapThrottlePairPolicy   = backoffPolicy{freeAttempts: 5, baseDelay: time.Second, maxDelay: 5 * time.Minute}
 	ldapThrottleUserPolicy   = backoffPolicy{freeAttempts: 50, baseDelay: time.Second, maxDelay: 5 * time.Minute}
 	ldapThrottleSourcePolicy = backoffPolicy{freeAttempts: 20, baseDelay: time.Second, maxDelay: 5 * time.Minute}
+	ldapThrottleSitePolicy   = backoffPolicy{freeAttempts: 200, baseDelay: time.Second, maxDelay: 5 * time.Minute}
 )
 
 const (
-	ldapThrottleEntryTTL      = time.Hour // idle expiry, and the user ceiling window
-	ldapThrottleMaxEntries    = 50000     // per table
-	ldapThrottleSweepInterval = time.Minute
-	ldapThrottleEvictScan     = 64
+	ldapThrottleEntryTTL       = time.Hour // idle expiry, and the user ceiling window
+	ldapThrottleOverflowShards = 64
+	ldapThrottleMaxEntries     = 50000 // per table, plus overflow shards
+	ldapThrottleSweepInterval  = time.Minute
+	ldapThrottleEvictScan      = 64
 )
 
 // globalLDAPLoginThrottle throttles LDAP STS logins.
@@ -110,6 +115,7 @@ type ldapLoginThrottle struct {
 	pairs      throttleTable
 	users      throttleTable
 	sources    throttleTable
+	sites      throttleTable
 	ttl        time.Duration
 	maxEntries int
 	lastSweep  time.Time
@@ -121,26 +127,28 @@ func newLDAPLoginThrottle() *ldapLoginThrottle {
 		pairs:      throttleTable{policy: ldapThrottlePairPolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		users:      throttleTable{policy: ldapThrottleUserPolicy, fixedWindow: true, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		sources:    throttleTable{policy: ldapThrottleSourcePolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
+		sites:      throttleTable{policy: ldapThrottleSitePolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		ttl:        ldapThrottleEntryTTL,
 		maxEntries: ldapThrottleMaxEntries,
 		now:        time.Now,
 	}
 }
 
+func (t *ldapLoginThrottle) tables() []*throttleTable {
+	return []*throttleTable{&t.pairs, &t.users, &t.sources, &t.sites}
+}
+
 // ldapThrottleSource identifies the source of a request for throttling. It
 // uses the TCP peer address, which unlike forwarding headers cannot be
 // chosen by the client.
 type ldapThrottleSource struct {
-	pair  string // source for the (username, source) backoff
-	spray string // source for the distinct-username (spraying) limit
+	net  string // IPv4 address or IPv6 /64
+	site string // IPv6 /48, empty for IPv4
 }
 
-// ldapThrottleSourceOf returns the throttling sources of a request. IPv6
-// peers are grouped by /64 for the (username, source) backoff, the usual
-// size of a single subscriber network, so that neighbours are not blocked
-// for someone else's guesses, and by /48, the usual size of a site
-// allocation, for the spraying limit, so that rotating through /64s of one
-// allocation does not avoid it.
+// ldapThrottleSourceOf returns the throttling source of a request. IPv6
+// peers are grouped by /64, the usual size of a single subscriber network,
+// and additionally by /48, the usual size of a site allocation.
 func ldapThrottleSourceOf(r *http.Request) ldapThrottleSource {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -148,20 +156,27 @@ func ldapThrottleSourceOf(r *http.Request) ldapThrottleSource {
 	}
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
-		return ldapThrottleSource{pair: "invalid", spray: "invalid"}
+		return ldapThrottleSource{net: "invalid"}
 	}
 	addr = addr.WithZone("").Unmap()
 	if !addr.Is6() {
-		return ldapThrottleSource{pair: addr.String(), spray: addr.String()}
+		return ldapThrottleSource{net: addr.String()}
 	}
 	p64, _ := addr.Prefix(64)
 	p48, _ := addr.Prefix(48)
-	return ldapThrottleSource{pair: p64.String(), spray: p48.String()}
+	return ldapThrottleSource{net: p64.String(), site: p48.String()}
 }
 
-// ldapThrottleOverflowKey is the shared counter of a table used for new keys
-// while the table is full and no entry may be evicted.
-var ldapThrottleOverflowKey = ldapThrottleKey(sha256.Sum256([]byte("overflow")))
+// ldapThrottleOverflowKeys are the shared counters of a table used for new
+// keys while the table is full and no entry may be evicted. Keys are spread
+// over the shards by their hash, so a flood cannot funnel every untracked
+// key into a single counter.
+var ldapThrottleOverflowKeys = func() (keys [ldapThrottleOverflowShards]ldapThrottleKey) {
+	for i := range keys {
+		keys[i] = sha256.Sum256([]byte{'o', 'v', 'e', 'r', 'f', 'l', 'o', 'w', byte(i)})
+	}
+	return keys
+}()
 
 // ldapAttempt is an admitted login attempt.
 type ldapAttempt struct {
@@ -169,6 +184,8 @@ type ldapAttempt struct {
 	pair         ldapThrottleKey
 	user         ldapThrottleKey
 	source       ldapThrottleKey
+	site         ldapThrottleKey
+	hasSite      bool
 	newPair      bool
 	pairOverflow bool
 }
@@ -184,7 +201,7 @@ func (t *ldapLoginThrottle) acquire(username string, source ldapThrottleSource) 
 
 	now := t.now()
 	if now.Sub(t.lastSweep) > ldapThrottleSweepInterval {
-		for _, tbl := range []*throttleTable{&t.pairs, &t.users, &t.sources} {
+		for _, tbl := range t.tables() {
 			for k, e := range tbl.entries {
 				if tbl.expired(e, now, t.ttl) {
 					delete(tbl.entries, k)
@@ -194,23 +211,27 @@ func (t *ldapLoginThrottle) acquire(username string, source ldapThrottleSource) 
 		t.lastSweep = now
 	}
 
-	a := &ldapAttempt{
-		t:      t,
-		pair:   t.slot(&t.pairs, sha256.Sum256([]byte("pair\x00"+username+"\x00"+source.pair)), now),
-		user:   t.slot(&t.users, sha256.Sum256([]byte("user\x00"+username)), now),
-		source: t.slot(&t.sources, sha256.Sum256([]byte("source\x00"+source.spray)), now),
+	a := &ldapAttempt{t: t, hasSite: source.site != ""}
+	a.pair, a.pairOverflow = t.slot(&t.pairs, sha256.Sum256([]byte("pair\x00"+username+"\x00"+source.net)), now)
+	a.user, _ = t.slot(&t.users, sha256.Sum256([]byte("user\x00"+username)), now)
+	a.source, _ = t.slot(&t.sources, sha256.Sum256([]byte("source\x00"+source.net)), now)
+	if a.hasSite {
+		a.site, _ = t.slot(&t.sites, sha256.Sum256([]byte("site\x00"+source.site)), now)
 	}
-	a.pairOverflow = a.pair == ldapThrottleOverflowKey
 
-	if t.blocked(&t.pairs, a.pair, now) || t.blocked(&t.users, a.user, now) || t.blocked(&t.sources, a.source, now) {
+	if t.blocked(&t.pairs, a.pair, now) || t.blocked(&t.users, a.user, now) ||
+		t.blocked(&t.sources, a.source, now) || (a.hasSite && t.blocked(&t.sites, a.site, now)) {
 		return nil
 	}
-	// The source counts distinct usernames, not repeated attempts. Pairs
-	// that could not be tracked count every attempt.
+	// Sources count distinct usernames, not repeated attempts. Pairs that
+	// could not be tracked count every attempt.
 	a.newPair = t.count(&t.pairs, a.pair, now) || a.pairOverflow
 	t.count(&t.users, a.user, now)
 	if a.newPair {
 		t.count(&t.sources, a.source, now)
+		if a.hasSite {
+			t.count(&t.sites, a.site, now)
+		}
 	}
 	return a
 }
@@ -222,15 +243,13 @@ func (a *ldapAttempt) succeeded() {
 	a.t.mu.Lock()
 	defer a.t.mu.Unlock()
 	if a.pairOverflow {
-		// Never clear the shared overflow counter.
+		// Never clear a shared overflow counter.
 		a.t.refund(&a.t.pairs, a.pair)
 	} else {
 		delete(a.t.pairs.entries, a.pair)
 	}
 	a.t.refund(&a.t.users, a.user)
-	if a.newPair {
-		a.t.refund(&a.t.sources, a.source)
-	}
+	a.refundSources()
 }
 
 // notCredentialFailure refunds the attempt, e.g. when the LDAP server could
@@ -240,8 +259,16 @@ func (a *ldapAttempt) notCredentialFailure() {
 	defer a.t.mu.Unlock()
 	a.t.refund(&a.t.pairs, a.pair)
 	a.t.refund(&a.t.users, a.user)
-	if a.newPair {
-		a.t.refund(&a.t.sources, a.source)
+	a.refundSources()
+}
+
+func (a *ldapAttempt) refundSources() {
+	if !a.newPair {
+		return
+	}
+	a.t.refund(&a.t.sources, a.source)
+	if a.hasSite {
+		a.t.refund(&a.t.sites, a.site)
 	}
 }
 
@@ -292,22 +319,23 @@ func (t *ldapLoginThrottle) count(tbl *throttleTable, key ldapThrottleKey, now t
 // table is full it frees room by evicting an expired or failure-free entry
 // from a bounded sample. Entries holding failures are never evicted, since
 // that would let a flood of new keys reset them; if none can be evicted the
-// attempt is tracked under the table's shared overflow counter, which
-// limits all such untracked keys together until room frees up.
-func (t *ldapLoginThrottle) slot(tbl *throttleTable, key ldapThrottleKey, now time.Time) ldapThrottleKey {
+// attempt is tracked under one of the table's shared overflow counters
+// (chosen by the key's hash), which limit untracked keys together until
+// room frees up. It reports whether an overflow counter was chosen.
+func (t *ldapLoginThrottle) slot(tbl *throttleTable, key ldapThrottleKey, now time.Time) (ldapThrottleKey, bool) {
 	if _, ok := tbl.entries[key]; ok || len(tbl.entries) < t.maxEntries {
-		return key
+		return key, false
 	}
 	n := 0
 	for k, e := range tbl.entries {
-		if k != ldapThrottleOverflowKey && (tbl.expired(e, now, t.ttl) || e.attempts == 0) {
+		if tbl.expired(e, now, t.ttl) || e.attempts == 0 {
 			delete(tbl.entries, k)
-			return key
+			return key, false
 		}
 		n++
 		if n >= ldapThrottleEvictScan {
 			break
 		}
 	}
-	return ldapThrottleOverflowKey
+	return ldapThrottleOverflowKeys[int(key[0])%ldapThrottleOverflowShards], true
 }
