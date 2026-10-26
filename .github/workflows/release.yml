@@ -1,0 +1,108 @@
+name: Release
+
+# Releases are tagged the way upstream MinIO tags them:
+#   RELEASE.<UTC time>                 e.g. RELEASE.2026-10-26T16-08-21Z
+#   RELEASE.<UTC time>.hotfix.<commit> backport of fixes onto a release
+# See RELEASING.md.
+on:
+  push:
+    tags: ["RELEASE.*"]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: downstream-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'RELEASE.')
+    # Releases are published only to GitHub Container Registry; downstream
+    # users mirror from there.
+    runs-on: self-hosted
+    environment: downstream-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      # A buildx builder is needed for the provenance and SBOM attestations.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install cosign
+        # Built from source at a pinned version; the module is verified
+        # against the Go checksum database.
+        run: |
+          set -euo pipefail
+          GOTOOLCHAIN=auto go install github.com/sigstore/cosign/v3/cmd/cosign@v3.1.4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Validate release and advisory gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          re='^RELEASE\.([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2})-([0-9]{2})-([0-9]{2})Z(\.hotfix\.[0-9a-f]{7,40})?$'
+          [[ "$GITHUB_REF_NAME" =~ $re ]]
+          # Fork releases must sort after upstream's final release tag.
+          [[ "$GITHUB_REF_NAME" > "RELEASE.2025-10-15T17-29-55Z" ]]
+          # Regular releases are cut from master; hotfixes from release/* branches.
+          if [[ -z "${BASH_REMATCH[5]}" ]]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          else
+            git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/release/'
+          fi
+          test "$(jq '[.advisories[] | select(.status != "closed")] | length' security/advisory-matrix.json)" = 0
+          go test ./...
+          go vet ./...
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Generate version ldflags
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          re='^RELEASE\.([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2})-([0-9]{2})-([0-9]{2})Z(\.(hotfix\.[0-9a-f]+))?$'
+          [[ "$GITHUB_REF_NAME" =~ $re ]]
+          version="${BASH_REMATCH[1]}T${BASH_REMATCH[2]}:${BASH_REMATCH[3]}:${BASH_REMATCH[4]}Z"
+          ldflags="$(MINIO_RELEASE=RELEASE MINIO_HOTFIX="${BASH_REMATCH[6]}" go run buildscripts/gen-ldflags.go "$version")"
+          # The binary must report exactly the tag being released.
+          [[ "$ldflags" == *"cmd.ReleaseTag=$GITHUB_REF_NAME "* ]]
+          echo "ldflags=$ldflags" >> "$GITHUB_OUTPUT"
+      - name: Build and push immutable linux/amd64 image
+        env:
+          BUILD_BASE_DIGEST: ${{ vars.DOWNSTREAM_BUILD_BASE_DIGEST }}
+          RUNTIME_BASE_DIGEST: ${{ vars.DOWNSTREAM_RUNTIME_BASE_DIGEST }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LDFLAGS: ${{ steps.version.outputs.ldflags }}
+        run: |
+          set -euo pipefail
+          test -n "$BUILD_BASE_DIGEST"; test -n "$RUNTIME_BASE_DIGEST"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build --platform linux/amd64 --pull=false \
+            --build-arg BUILD_BASE="golang:1.26.10-alpine@$BUILD_BASE_DIGEST" \
+            --build-arg RUNTIME_BASE="registry.access.redhat.com/ubi9/ubi-micro@$RUNTIME_BASE_DIGEST" \
+            --build-arg RELEASE="$GITHUB_REF_NAME" \
+            --build-arg LDFLAGS="$LDFLAGS" \
+            --tag "ghcr.io/$GITHUB_REPOSITORY:$GITHUB_REF_NAME" \
+            --push --provenance=true --sbom=true -f Dockerfile.downstream .
+      - name: Sign the image and write the release manifest
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$GITHUB_REPOSITORY"
+          digest="$(docker buildx imagetools inspect "$image:$GITHUB_REF_NAME" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "$image@$digest"
+          jq -n --arg tag "$GITHUB_REF_NAME" --arg image "$image" --arg digest "$digest" \
+            --arg upstream "minio/minio@7aac2a2c" \
+            '{release_tag:$tag,image:$image,digest:$digest,upstream_base:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
+      - name: Verify the release tag
+        run: git rev-parse --verify --quiet "refs/tags/${GITHUB_REF_NAME}^{commit}"
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          files: release-manifest.json
+          generate_release_notes: true

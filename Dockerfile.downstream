@@ -1,0 +1,29 @@
+ARG BUILD_BASE
+FROM ${BUILD_BASE} AS build
+
+ARG LDFLAGS
+WORKDIR /src
+RUN apk add --no-cache ca-certificates git
+COPY . .
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+# The build image must provide exactly the toolchain go.mod pins.
+RUN test "$(go env GOVERSION)" = "$(sed -n 's/^toolchain //p' go.mod)"
+# LDFLAGS come from buildscripts/gen-ldflags.go, as in upstream builds.
+RUN test -n "${LDFLAGS}" && go build -trimpath -ldflags "${LDFLAGS}" -o /out/minio .
+
+ARG RUNTIME_BASE
+FROM ${RUNTIME_BASE}
+ARG RELEASE
+LABEL org.opencontainers.image.title="MinIO" \
+      org.opencontainers.image.version="${RELEASE}" \
+      org.opencontainers.image.source="https://github.com/boson-science/minio"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /out/minio /usr/bin/minio
+COPY CREDITS /licenses/CREDITS
+COPY LICENSE /licenses/LICENSE
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/bin/minio /usr/bin/docker-entrypoint.sh
+EXPOSE 9000 9001
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]
