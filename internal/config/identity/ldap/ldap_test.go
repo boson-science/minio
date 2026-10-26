@@ -57,6 +57,21 @@ func TestIsUserLookupMiss(t *testing.T) {
 	}
 }
 
+func TestIsNetworkError(t *testing.T) {
+	if !isNetworkError(ldap.NewError(ldap.ErrorNetwork, errors.New("connection reset"))) {
+		t.Fatal("go-ldap network errors must be classified as network errors")
+	}
+	if !isNetworkError(fmt.Errorf("wrapped: %w", ldap.NewError(ldap.ErrorNetwork, errors.New("timeout")))) {
+		t.Fatal("wrapped network errors must be classified as network errors")
+	}
+	if isNetworkError(ldap.NewError(ldap.LDAPResultInvalidCredentials, errors.New("invalid credentials"))) {
+		t.Fatal("invalid credentials must not be classified as a network error")
+	}
+	if isNetworkError(ldap.NewError(ldap.LDAPResultUnwillingToPerform, errors.New("account locked"))) {
+		t.Fatal("server responses must not be classified as network errors")
+	}
+}
+
 func TestDummyBindDN(t *testing.T) {
 	l := Config{LDAP: xldap.Config{UserDNSearchBaseDistName: " ou=people,dc=min,dc=io ;ou=other,dc=min,dc=io"}}
 	dn1, dn2 := l.dummyBindDN(), l.dummyBindDN()

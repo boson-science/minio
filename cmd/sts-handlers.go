@@ -39,7 +39,6 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/mux"
-	xldap "github.com/minio/pkg/v3/ldap"
 	"github.com/minio/pkg/v3/policy"
 	"github.com/minio/pkg/v3/wildcard"
 )
@@ -647,10 +646,14 @@ func (sts *stsAPIHandlers) AssumeRoleWithClientGrants(w http.ResponseWriter, r *
 	sts.AssumeRoleWithSSO(w, r)
 }
 
-// ldapBindFn authenticates LDAP users for AssumeRoleWithLDAPIdentity; it is a
-// variable so that tests can run without an LDAP server.
-var ldapBindFn = func(username, password string) (*xldap.DNSearchResult, []string, error) {
-	return globalIAMSys.LDAPConfig.Bind(username, password)
+// errLDAPNotConfigured matches the error minio/pkg returns when LDAP is not
+// configured.
+var errLDAPNotConfigured = errors.New("LDAP is not configured")
+
+// ldapEnabledFn reports whether LDAP is configured; it is a variable so that
+// tests can run without an LDAP server.
+var ldapEnabledFn = func() bool {
+	return globalIAMSys.LDAPConfig.Enabled()
 }
 
 // writeLDAPAccessDenied logs why an LDAP login was refused and writes the
@@ -706,23 +709,23 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 		return
 	}
 
-	// Throttle attempts before contacting the LDAP server. Rejected,
-	// unknown-user and throttled attempts all get the same generic
-	// response; details are only logged.
-	source := ldapThrottleSourceOf(r)
-	attempt := globalLDAPLoginThrottle.acquire(ldapUsername, source)
-	if attempt == nil {
-		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source.net))
+	if !ldapEnabledFn() {
+		// Same response as before throttling was added; this does not
+		// depend on the user.
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue,
+			fmt.Errorf("LDAP server error: %w", errLDAPNotConfigured))
 		return
 	}
 
-	lookupResult, groupDistNames, err := ldapBindFn(ldapUsername, ldapPassword)
+	// Throttle attempts before contacting the LDAP server. Rejected,
+	// unknown-user and throttled attempts all get the same generic
+	// response; details are only logged.
+	lookupResult, groupDistNames, attempt, err := ldapThrottledBind(ldapUsername, ldapPassword, ldapThrottleSourceOf(r))
 	if err != nil {
 		if errors.Is(err, cfgldap.ErrInvalidCredentials) {
 			writeLDAPAccessDenied(ctx, w, err)
 			return
 		}
-		attempt.notCredentialFailure()
 		stsLogIf(ctx, fmt.Errorf("LDAP server error: %w", err))
 		writeSTSErrorResponse(ctx, w, ErrSTSUpstreamError, nil)
 		return

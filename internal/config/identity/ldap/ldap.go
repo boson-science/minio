@@ -243,6 +243,12 @@ func isUserLookupMiss(err error) bool {
 		strings.Contains(msg, "Multiple DNs for")
 }
 
+// isNetworkError reports whether err is a client-side network failure (the
+// connection to the LDAP server failed) rather than a server response.
+func isNetworkError(err error) bool {
+	return ldap.IsErrorWithCode(err, ldap.ErrorNetwork)
+}
+
 // dummyBindDN returns a random DN under the first configured user search base
 // that is not expected to exist in the directory.
 func (l *Config) dummyBindDN() string {
@@ -284,11 +290,15 @@ func (l *Config) Bind(username, password string) (*xldap.DNSearchResult, []strin
 		return nil, nil, fmt.Errorf("%w: unable to find user DN: %v", ErrInvalidCredentials, err)
 	}
 
-	// Authenticate the user credentials. Any failure of the user bind is
+	// Authenticate the user credentials. A failure of the user bind is
 	// reported as invalid credentials, so that server diagnostics (such as
-	// account state) cannot be used to tell users apart.
+	// account state) cannot be used to tell users apart, unless the
+	// connection itself failed.
 	err = conn.Bind(lookupResult.ActualDN, password)
 	if err != nil {
+		if isNetworkError(err) {
+			return nil, nil, fmt.Errorf("LDAP bind for DN %s failed: %w", lookupResult.ActualDN, err)
+		}
 		return nil, nil, fmt.Errorf("%w: LDAP auth failed for DN %s: %v", ErrInvalidCredentials, lookupResult.ActualDN, err)
 	}
 

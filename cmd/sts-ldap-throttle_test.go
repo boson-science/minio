@@ -21,10 +21,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -45,6 +47,7 @@ func (t *ldapLoginThrottle) resetForTest(now func() time.Time) {
 	t.users.entries = make(map[ldapThrottleKey]*throttleEntry)
 	t.sources.entries = make(map[ldapThrottleKey]*throttleEntry)
 	t.sites.entries = make(map[ldapThrottleKey]*throttleEntry)
+	t.knownGood = make(map[ldapThrottleKey]time.Time)
 	t.maxEntries = ldapThrottleMaxEntries
 	t.lastSweep = time.Time{}
 	t.now = now
@@ -449,6 +452,169 @@ func TestLDAPThrottleOverflowSharding(t *testing.T) {
 	}
 }
 
+func TestLDAPThrottleKnownGoodSource(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
+	victimSrc := ldapTestSourceOf("[2001:db8:7:1::10]:1")
+
+	// The victim logs in successfully from its usual source.
+	a := th.acquire("victim", victimSrc)
+	if a == nil {
+		t.Fatal("first login should be admitted")
+	}
+	a.succeeded()
+
+	// An attacker exhausts the victim's per-user ceiling from many /64s.
+	for i := range ldapThrottleUserPolicy.freeAttempts {
+		th.acquire("victim", ldapTestSourceOf(fmt.Sprintf("[2001:db8:%x:1::1]:1", 0x100+i)))
+	}
+	if th.acquire("victim", ldapTestSourceOf("[2001:db8:ffff:1::1]:1")) != nil {
+		t.Fatal("per-user ceiling should block unknown sources")
+	}
+	// The victim's known-good source is not blocked by the ceiling.
+	if a := th.acquire("victim", victimSrc); a == nil {
+		t.Fatal("known-good source must not be blocked by the per-user ceiling")
+	} else {
+		a.succeeded()
+	}
+
+	// Spraying from the victim's own /64 blocks other users there, but not
+	// the victim's known-good login.
+	for i := range ldapThrottleSourcePolicy.freeAttempts {
+		th.acquire(fmt.Sprint("spray", i), ldapTestSourceOf("[2001:db8:7:1::66]:1"))
+	}
+	if th.acquire("other", victimSrc) != nil {
+		t.Fatal("spraying limit should block other users from the source")
+	}
+	if th.acquire("victim", victimSrc) == nil {
+		t.Fatal("known-good pair must bypass the spraying limit")
+	}
+
+	// The pair's own backoff still applies to a known-good source.
+	th2, _ := newTestLDAPThrottle()
+	a = th2.acquireS("victim", "10.0.0.1")
+	a.succeeded()
+	if n := failN(th2, "victim", "10.0.0.1", ldapThrottlePairPolicy.freeAttempts+3); n != ldapThrottlePairPolicy.freeAttempts {
+		t.Fatalf("pair backoff must still apply to known-good sources, admitted %d", n)
+	}
+
+	// Known-good pairs expire.
+	clk.advance(ldapThrottleKnownGoodTTL + ldapThrottleSweepInterval)
+	th.acquireS("someone", "10.9.9.9")
+	if len(th.knownGood) != 0 {
+		t.Fatalf("known-good pairs should expire, have %d", len(th.knownGood))
+	}
+}
+
+func TestLDAPThrottleUsersTableFull(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
+	th.maxEntries = 10
+	now := clk.now()
+
+	// A flood filled the users table with blocked entries and also
+	// saturated every user overflow shard.
+	blockedEntry := func() *throttleEntry {
+		return &throttleEntry{attempts: 100, blockedUntil: now.Add(time.Hour), firstSeen: now, lastSeen: now}
+	}
+	for i := range th.maxEntries {
+		th.users.entries[th.key(fmt.Sprint("user\x00flood", i))] = blockedEntry()
+	}
+	for _, k := range ldapThrottleOverflowKeys {
+		th.users.entries[k] = blockedEntry()
+	}
+
+	// Untracked legitimate users are not blocked by the per-user ceiling.
+	for i := range 20 {
+		a := th.acquireS(fmt.Sprint("legit", i), fmt.Sprint("192.0.2.", i))
+		if a == nil {
+			t.Fatalf("untracked user %d must not be blocked by a full users table", i)
+		}
+		if a.hasUser {
+			t.Fatal("untracked user must not be counted in the users table")
+		}
+		a.notCredentialFailure()
+	}
+	// The pair limit still applies to them.
+	if n := failN(th, "legit0", "192.0.2.0", ldapThrottlePairPolicy.freeAttempts+3); n != ldapThrottlePairPolicy.freeAttempts {
+		t.Fatalf("pair limit must still apply, admitted %d", n)
+	}
+}
+
+func TestLDAPThrottleUsernameLength(t *testing.T) {
+	th, _ := newTestLDAPThrottle()
+	if th.acquireS(strings.Repeat("a", ldapMaxUsernameLen), "10.0.0.1") == nil {
+		t.Fatal("usernames up to the limit must be admitted")
+	}
+	if th.acquireS(strings.Repeat("a", ldapMaxUsernameLen+1), "10.0.0.1") != nil {
+		t.Fatal("overlong usernames must be rejected")
+	}
+
+	var called bool
+	oldBind := ldapBindFn
+	defer func() { ldapBindFn = oldBind }()
+	ldapBindFn = func(string, string) (*xldap.DNSearchResult, []string, error) {
+		called = true
+		return nil, nil, nil
+	}
+	_, _, _, err := ldapThrottledBind(strings.Repeat("a", ldapMaxUsernameLen+1), "x", ldapThrottleSource{net: "10.0.0.2"})
+	if !errors.Is(err, cfgldap.ErrInvalidCredentials) || called {
+		t.Fatalf("overlong username must fail like invalid credentials without LDAP, got %v (called %v)", err, called)
+	}
+}
+
+func TestLDAPThrottleSFTPRemoteAddr(t *testing.T) {
+	// Connections without a known address (e.g. test mocks) must not panic
+	// and share the "invalid" source.
+	if got := sshRemoteAddr(newSSHConnMock("dillon")); got != "" {
+		t.Fatalf("expected empty address, got %q", got)
+	}
+	if got := ldapThrottleSourceOfAddr(""); got.net != "invalid" {
+		t.Fatalf("expected invalid source, got %+v", got)
+	}
+}
+
+func TestLDAPTrustedProxies(t *testing.T) {
+	trusted, err := parseLDAPTrustedProxies(" 10.0.0.0/8, bogus ,192.0.2.1, 2001:db8:ffff::/48,")
+	if err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("expected an error for the invalid entry, got %v", err)
+	}
+	if len(trusted) != 3 {
+		t.Fatalf("expected 3 valid entries, got %v", trusted)
+	}
+	if p, err := parseLDAPTrustedProxies(""); err != nil || len(p) != 0 {
+		t.Fatalf("empty setting must mean no trusted proxies, got %v, %v", p, err)
+	}
+
+	testCases := []struct {
+		name    string
+		trusted []netip.Prefix
+		peer    string
+		xff     []string
+		want    string
+	}{
+		{"default ignores headers", nil, "198.51.100.1:1", []string{"203.0.113.1"}, "198.51.100.1:1"},
+		{"untrusted peer ignores headers", trusted, "198.51.100.1:1", []string{"203.0.113.1"}, "198.51.100.1:1"},
+		{"trusted peer, client hop", trusted, "10.0.0.5:1", []string{"203.0.113.1"}, "203.0.113.1"},
+		{"spoofed left-most hop ignored", trusted, "10.0.0.5:1", []string{"1.2.3.4, 203.0.113.1"}, "203.0.113.1"},
+		{"trusted hops skipped", trusted, "10.0.0.5:1", []string{"1.2.3.4, 203.0.113.1, 192.0.2.1, 10.1.1.1"}, "203.0.113.1"},
+		{"multiple header lines", trusted, "10.0.0.5:1", []string{"1.2.3.4", "203.0.113.2, 10.0.0.6"}, "203.0.113.2"},
+		{"IPv6 trusted peer", trusted, "[2001:db8:ffff::1]:1", []string{"2001:db8:1::1"}, "2001:db8:1::1"},
+		{"unparsable hop uses peer", trusted, "10.0.0.5:1", []string{"203.0.113.1, garbage"}, "10.0.0.5:1"},
+		{"only trusted hops uses peer", trusted, "10.0.0.5:1", []string{"10.0.0.7"}, "10.0.0.5:1"},
+		{"no header uses peer", trusted, "10.0.0.5:1", nil, "10.0.0.5:1"},
+	}
+	for _, tc := range testCases {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = tc.peer
+		for _, v := range tc.xff {
+			r.Header.Add("X-Forwarded-For", v)
+		}
+		r.Header.Set("X-Real-IP", "203.0.113.200")
+		if got := ldapClientAddr(r, tc.trusted); got != tc.want {
+			t.Errorf("%s: ldapClientAddr = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // ldapSTSResult is the observable outcome of an LDAP STS request.
 type ldapSTSResult struct {
 	status int
@@ -579,6 +745,23 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 	const attacker, victim = "192.0.2.66:40000", "198.51.100.7:50000"
 	free := ldapThrottlePairPolicy.freeAttempts
 
+	// 0. LDAP not configured (the case in this test server): the previous,
+	// user independent 400 response, without throttling or contacting LDAP.
+	reset()
+	calls := bindCalls.Load()
+	for range 2 * free {
+		res := call("alice", "x", attacker, false)
+		if res.status != http.StatusBadRequest || res.code != "InvalidParameterValue" || res.msg != "LDAP server error: LDAP is not configured" {
+			c.Fatalf("unexpected response without LDAP configured: %d %s", res.status, res.body)
+		}
+	}
+	if bindCalls.Load() != calls || len(globalLDAPLoginThrottle.pairs.entries) != 0 {
+		c.Fatal("requests without LDAP configured must not be throttled or reach LDAP")
+	}
+	oldEnabled := ldapEnabledFn
+	defer func() { ldapEnabledFn = oldEnabled }()
+	ldapEnabledFn = func() bool { return true }
+
 	// 1. Unknown user, wrong password and missing policy are
 	// indistinguishable, on both routes and over the real listener.
 	reset()
@@ -606,7 +789,7 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 	for range free {
 		assertDenied("failure", call("alice", "x", attacker, false))
 	}
-	calls := bindCalls.Load()
+	calls = bindCalls.Load()
 	assertDenied("throttled pair", call("alice", goodPW, attacker, false))
 	assertDenied("throttled pair (variant, body route)", call("ALICE ", goodPW, attacker, true))
 	if bindCalls.Load() != calls {
@@ -659,4 +842,54 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 	}
 	ldapDown.Store(false)
 	assertOK("after outage", call("alice", goodPW, attacker, false))
+
+	// 7. Overlong usernames get the generic response without reaching LDAP.
+	reset()
+	calls = bindCalls.Load()
+	assertDenied("long username", call(strings.Repeat("a", ldapMaxUsernameLen+1), "x", attacker, false))
+	if bindCalls.Load() != calls {
+		c.Fatal("overlong usernames must not reach LDAP")
+	}
+
+	// 8. FTP LDAP logins are throttled by the client address.
+	reset()
+	const ftpAttacker, ftpVictim = "192.0.2.90:2121", "198.51.100.90:2121"
+	for range free {
+		if ok, err := ftpCheckLDAPPasswd("alice", "x", ftpAttacker); ok || !errors.Is(err, cfgldap.ErrInvalidCredentials) {
+			c.Fatalf("FTP wrong password: got %v, %v", ok, err)
+		}
+	}
+	calls = bindCalls.Load()
+	if ok, err := ftpCheckLDAPPasswd("alice", goodPW, ftpAttacker); ok || !errors.Is(err, errLDAPLoginThrottled) {
+		c.Fatalf("FTP login must be throttled, got %v, %v", ok, err)
+	}
+	if bindCalls.Load() != calls {
+		c.Fatal("throttled FTP logins must not reach LDAP")
+	}
+	if ok, err := ftpCheckLDAPPasswd("alice", goodPW, ftpVictim); !ok || err != nil {
+		c.Fatalf("FTP login from another address must succeed, got %v, %v", ok, err)
+	}
+
+	// 9. SFTP LDAP logins are throttled by the client address.
+	reset()
+	const sftpAttacker, sftpVictim = "192.0.2.91:50022", "198.51.100.91:50022"
+	for range free {
+		if perms, err := processLDAPAuthentication(nil, []byte("x"), "alice", sftpAttacker); perms != nil || !errors.Is(err, cfgldap.ErrInvalidCredentials) {
+			c.Fatalf("SFTP wrong password: got %v, %v", perms, err)
+		}
+	}
+	calls = bindCalls.Load()
+	if perms, err := processLDAPAuthentication(nil, []byte(goodPW), "alice", sftpAttacker); perms != nil || !errors.Is(err, errLDAPLoginThrottled) {
+		c.Fatalf("SFTP login must be throttled, got %v, %v", perms, err)
+	}
+	if bindCalls.Load() != calls {
+		c.Fatal("throttled SFTP logins must not reach LDAP")
+	}
+	// From another address the login is admitted and authenticated. (Issuing
+	// the SFTP session credentials afterwards needs a real LDAP config, so
+	// only the throttle decision is checked here.)
+	calls = bindCalls.Load()
+	if _, err := processLDAPAuthentication(nil, []byte(goodPW), "alice", sftpVictim); errors.Is(err, cfgldap.ErrInvalidCredentials) || bindCalls.Load() != calls+1 {
+		c.Fatalf("SFTP login from another address must reach LDAP and authenticate, got %v", err)
+	}
 }
