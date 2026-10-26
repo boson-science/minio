@@ -619,8 +619,13 @@ func setAuthMiddleware(h http.Handler) http.Handler {
 		tc, ok := r.Context().Value(mcontext.ContextTraceKey).(*mcontext.TraceCtxt)
 
 		aType := getRequestAuthType(r)
+		if aType == authTypeStreamingUnsignedTrailer && r.Header.Get(xhttp.Authorization) == "" {
+			// Anonymous unsigned-trailer upload; bucket policy decides.
+			h.ServeHTTP(w, r)
+			return
+		}
 		switch aType {
-		case authTypeSigned, authTypeSignedV2, authTypeStreamingSigned, authTypeStreamingSignedTrailer:
+		case authTypeSigned, authTypeSignedV2, authTypeStreamingSigned, authTypeStreamingSignedTrailer, authTypeStreamingUnsignedTrailer:
 			// Verify if date headers are set, if not reject the request
 			amzDate, errCode := parseAmzDateHeader(r)
 			if errCode != ErrNone {
@@ -716,6 +721,29 @@ func isPutRetentionAllowed(bucketName, objectName string, retDays int, retDate t
 	return ErrAccessDenied
 }
 
+// authenticateUnsignedTrailer returns the identity of an unsigned-trailer
+// upload. The payload of such a request is unsigned, so the only proof of
+// identity is the SigV4 signature in the Authorization header. Without that
+// header the request is anonymous and bucket policy decides.
+func authenticateUnsignedTrailer(r *http.Request, region string) (auth.Credentials, bool, APIErrorCode) {
+	if r.Form.Has(xhttp.AmzCredential) || r.Form.Has(xhttp.AmzSignature) || r.Form.Has(xhttp.AmzAlgorithm) {
+		return auth.Credentials{}, false, ErrSignatureVersionNotSupported
+	}
+	if r.Header.Get(xhttp.Authorization) == "" {
+		if r.Header.Get(xhttp.AmzSecurityToken) != "" {
+			return auth.Credentials{}, false, ErrAccessDenied
+		}
+		return auth.Credentials{}, false, ErrNone
+	}
+	if !isRequestSignatureV4(r) {
+		return auth.Credentials{}, false, ErrSignatureVersionNotSupported
+	}
+	if s3Err := doesSignatureMatch(unsignedPayloadTrailer, r, region, serviceS3); s3Err != ErrNone {
+		return auth.Credentials{}, false, s3Err
+	}
+	return getReqAccessKeyV4(r, region, serviceS3)
+}
+
 // isPutActionAllowed - check if PUT operation is allowed on the resource, this
 // call verifies bucket policies and IAM policies, supports multi user
 // checks etc.
@@ -731,11 +759,7 @@ func isPutActionAllowed(ctx context.Context, atype authType, bucketName, objectN
 	case authTypeStreamingSigned, authTypePresigned, authTypeSigned, authTypeStreamingSignedTrailer:
 		cred, owner, s3Err = getReqAccessKeyV4(r, region, serviceS3)
 	case authTypeStreamingUnsignedTrailer:
-		cred, owner, s3Err = getReqAccessKeyV4(r, region, serviceS3)
-		if s3Err == ErrMissingFields {
-			// Could be anonymous. cred + owner is zero value.
-			s3Err = ErrNone
-		}
+		cred, owner, s3Err = authenticateUnsignedTrailer(r, region)
 	}
 	if s3Err != ErrNone {
 		return s3Err

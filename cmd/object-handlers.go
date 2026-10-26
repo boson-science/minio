@@ -2242,7 +2242,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	// if Content-Length is unknown/missing, deny the request
 	size := r.ContentLength
 	rAuthType := getRequestAuthType(r)
-	if rAuthType == authTypeStreamingSigned || rAuthType == authTypeStreamingSignedTrailer {
+	if rAuthType == authTypeStreamingSigned || rAuthType == authTypeStreamingSignedTrailer || rAuthType == authTypeStreamingUnsignedTrailer {
 		if sizeStr, ok := r.Header[xhttp.AmzDecodedContentLength]; ok {
 			if sizeStr[0] == "" {
 				writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrMissingContentLength), r.URL)
@@ -2296,6 +2296,13 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
+	case authTypeStreamingUnsignedTrailer:
+		// Initialize stream chunked reader with optional trailers.
+		reader, s3Err = newUnsignedV4ChunkedReader(r, true, r.Header.Get(xhttp.Authorization) != "")
+		if s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
 	case authTypeSignedV2, authTypePresignedV2:
 		s3Err = isReqAuthenticatedV2(r)
 		if s3Err != ErrNone {
@@ -2311,6 +2318,11 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		if !skipContentSha256Cksum(r) {
 			sha256hex = getContentSha256Cksum(r, serviceS3)
 		}
+	case authTypeAnonymous:
+		// Allowed by bucket policy, checked above.
+	default:
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrSignatureVersionNotSupported), r.URL)
+		return
 	}
 
 	hreader, err := hash.NewReader(ctx, reader, size, md5hex, sha256hex, size)
