@@ -5,7 +5,9 @@ ARG LDFLAGS
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git
 COPY . .
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+# The build image must provide exactly the toolchain go.mod pins.
+RUN test "$(go env GOVERSION)" = "$(sed -n 's/^toolchain //p' go.mod)"
 # LDFLAGS come from buildscripts/gen-ldflags.go, as in upstream builds.
 RUN test -n "${LDFLAGS}" && go build -trimpath -ldflags "${LDFLAGS}" -o /out/minio .
 

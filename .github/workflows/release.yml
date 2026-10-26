@@ -81,7 +81,7 @@ jobs:
           test -n "$BUILD_BASE_DIGEST"; test -n "$RUNTIME_BASE_DIGEST"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx build --platform linux/amd64 --pull=false \
-            --build-arg BUILD_BASE="golang:1.24-alpine@$BUILD_BASE_DIGEST" \
+            --build-arg BUILD_BASE="golang:1.26.10-alpine@$BUILD_BASE_DIGEST" \
             --build-arg RUNTIME_BASE="registry.access.redhat.com/ubi9/ubi-micro@$RUNTIME_BASE_DIGEST" \
             --build-arg RELEASE="$GITHUB_REF_NAME" \
             --build-arg LDFLAGS="$LDFLAGS" \
