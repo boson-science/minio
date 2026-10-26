@@ -712,6 +712,11 @@ func (f *folderScanner) scanFolder(ctx context.Context, folder cachedFolder, int
 			if !f.shouldHeal() {
 				break
 			}
+			// Keys come from the (possibly remotely supplied) cache and
+			// are joined onto the drive path below; skip unsafe ones.
+			if checkPathComponents(k) != nil {
+				continue
+			}
 			bucket, prefix := path2BucketObject(k)
 			stopFn := globalScannerMetrics.time(scannerMetricCheckMissing)
 			f.updateCurrentPath(k)
