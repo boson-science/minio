@@ -73,7 +73,7 @@ jobs:
           cosign sign --yes "$HARBOR_IMAGE@$digest"
           cosign sign --yes "$ghcr_image@$digest"
           jq -n --arg tag "$GITHUB_REF_NAME" --arg digest "$digest" --arg ghcr_digest "$ghcr_digest" \
-            --arg upstream "RELEASE.2025-10-15T17-29-55Z" \
+            --arg upstream "minio/minio@7aac2a2c" \
             --arg harbor_repository "$HARBOR_REPOSITORY" \
             '{release_tag:$tag,harbor_repository:$harbor_repository,harbor_tag:$tag,harbor_digest:$digest,ghcr_digest:$ghcr_digest,upstream_base_tag:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
           gh release create "$GITHUB_REF_NAME" release-manifest.json --verify-tag --generate-notes

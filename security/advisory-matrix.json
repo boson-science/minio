@@ -1,6 +1,6 @@
 {
   "release": "FERMION.2026.09.1",
-  "upstream_base": "RELEASE.2025-10-15T17-29-55Z",
+  "upstream_base": "minio/minio master 7aac2a2c (after RELEASE.2025-10-15T17-29-55Z)",
   "console": "github.com/minio/console v1.7.6",
   "policy": "Every applicable advisory must have a reviewed fix and a negative regression test before a FERMION tag can publish.",
   "advisories": [
