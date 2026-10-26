@@ -1,4 +1,4 @@
-# MinIO STS Quickstart Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# MinIO STS Quickstart Guide
 
 The MinIO Security Token Service (STS) is an endpoint service that enables clients to request temporary credentials for MinIO resources. Temporary credentials work almost identically to default admin credentials, with some differences:
 

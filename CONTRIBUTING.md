@@ -1,4 +1,4 @@
-# MinIO Contribution Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# MinIO Contribution Guide
 
 ``MinIO`` community welcomes your contribution. To make the process as seamless as possible, we recommend you read this contribution guide.
 
@@ -39,7 +39,7 @@ git checkout -b my-new-feature
 
 After your code changes, make sure
 
-- To add test cases for the new code. If you have questions about how to do it, please ask on our [Slack](https://slack.min.io) channel.
+- To add test cases for the new code. If you have questions about how to do it, please ask in a [GitHub issue](https://github.com/boson-science/minio/issues).
 - To run `make verifiers`
 - To squash your commits into a single commit. `git rebase -i`. It's okay to force update your pull request.
 - To run `make test` and `make build` completes.
@@ -79,4 +79,4 @@ To remove a dependency
 
 ### What are the coding guidelines for MinIO?
 
-``MinIO`` is fully conformant with Golang style. Refer: [Effective Go](https://github.com/golang/go/wiki/CodeReviewComments) article from Golang project. If you observe offending code, please feel free to send a pull request or ping us on [Slack](https://slack.min.io).
+``MinIO`` is fully conformant with Golang style. Refer: [Effective Go](https://github.com/golang/go/wiki/CodeReviewComments) article from Golang project. If you observe offending code, please feel free to send a pull request.

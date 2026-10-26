@@ -1,4 +1,4 @@
-# MinIO Server Config Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# MinIO Server Config Guide
 
 ## Configuration Directory
 
@@ -189,7 +189,7 @@ notify_redis          publish bucket notifications to Redis datastores
 
 ### Accessing configuration
 
-All configuration changes can be made using [`mc admin config` get/set/reset/export/import commands](https://github.com/minio/mc/blob/master/docs/minio-admin-complete-guide.md).
+All configuration changes can be made using [`mc admin config` get/set/reset/export/import commands](https://docs.min.io/community/minio-object-store/reference/minio-mc-admin.html).
 
 #### List all config keys available
 
@@ -281,7 +281,6 @@ Healing is enabled by default. The following configuration settings allow for mo
 In most setups this is sufficient to heal the content after drive replacements. Setting `max_sleep` to a *lower* value and setting `max_io` to a *higher* value would make heal go faster.
 
 Each node is responsible of healing its local drives; Each drive will have multiple heal workers which is the quarter of the number of CPU cores of the node or the quarter of the configured nr_requests of the drive (https://www.kernel.org/doc/Documentation/block/queue-sysfs.txt). It is also possible to provide a custom number of workers by using this command: `mc admin config set alias/ heal drive_workers=100` .
-
 
 ```
 ~ mc admin config set alias/ heal

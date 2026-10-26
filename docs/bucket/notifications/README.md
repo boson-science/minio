@@ -1,4 +1,4 @@
-# MinIO Bucket Notification Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# MinIO Bucket Notification Guide
 
 Events occurring on objects in a bucket can be monitored using bucket event notifications.
 
@@ -678,7 +678,7 @@ Use `mc admin config set` command to update the configuration for the deployment
 mc admin config set myminio notify_nats:1 password="yoursecret" streaming_max_pub_acks_in_flight="10" subject="" address="0.0.0.0:4222"  token="" username="yourusername" ping_interval="0" queue_limit="0" tls="off" streaming_async="on" queue_dir="" streaming_cluster_id="test-cluster" streaming_enable="on"
 ```
 
-MinIO server also supports [NATS Streaming mode](http://nats.io/documentation/streaming/nats-streaming-intro/) that offers additional functionality like `At-least-once-delivery`, and `Publisher rate limiting`. To configure MinIO server to send notifications to NATS Streaming server, update the MinIO server configuration file as follows:
+MinIO server also supports [NATS Streaming mode](https://docs.nats.io/legacy/stan/intro) that offers additional functionality like `At-least-once-delivery`, and `Publisher rate limiting`. To configure MinIO server to send notifications to NATS Streaming server, update the MinIO server configuration file as follows:
 
 Read more about sections `cluster_id`, `client_id` on [NATS documentation](https://github.com/nats-io/nats-streaming-server/blob/master/README.md). Section `maxPubAcksInflight` is explained [here](https://github.com/nats-io/stan.go#publisher-rate-limiting).
 
@@ -774,7 +774,6 @@ func main() {
   })
  }
 
-
  stanConnection, _ = stan.Connect("test-cluster", "test-client", stan.NatsURL("nats://yourusername:yoursecret@0.0.0.0:4222"), stan.SetConnectionLostHandler(func(c stan.Conn, _ error) {
   go func() {
    for {
@@ -845,7 +844,7 @@ Received a message: {"EventType":"s3:ObjectCreated:Put","Key":"images/myphoto.jp
 >
 > Please make sure this step is carried out, without this step PostgreSQL notification targets will not work,
 > an error message will be shown on the console upon server upgrade/restart, make sure to follow the above
-> instructions appropriately. For further questions please join our <https://slack.min.io>
+> instructions appropriately. For further questions please open a [GitHub issue](https://github.com/boson-science/minio/issues).
 
 Install [PostgreSQL](https://www.postgresql.org/) database server. For illustrative purposes, we have set the "postgres" user password as `password` and created a database called `minio_events` to store the events.
 
@@ -978,7 +977,7 @@ key                 |                      value
 >
 > Please make sure this step is carried out, without this step MySQL notification targets will not work,
 > an error message will be shown on the console upon server upgrade/restart, make sure to follow the above
-> instructions appropriately. For further questions please join our <https://slack.min.io>
+> instructions appropriately. For further questions please open a [GitHub issue](https://github.com/boson-science/minio/issues).
 
 Install MySQL from [here](https://dev.mysql.com/downloads/mysql/). For illustrative purposes, we have set the root password as `password` and created a database called `miniodb` to store the events.
 

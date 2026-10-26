@@ -34,7 +34,7 @@ Follow the steps from the Veeam documentation for adding MinIO as an object stor
 
 For Veeam Backup with Immutability, choose the amount of days you want to make backups immutable for
 
-![Choose Immutability Days for Object Store](https://raw.githubusercontent.com/minio/minio/master/docs/integrations/veeam/screenshots/object_store_immutable_days.png)
+![Choose Immutability Days for Object Store](screenshots/object_store_immutable_days.png)
 
 ### Creating the Scale-out Backup Repository
 
@@ -58,7 +58,7 @@ For Veeam Backup with Immutability, choose the amount of days you want to make b
 
 - For Veeam Backup with Immutability, you can choose a number of restore points or days to make backups immutable.
 
-![Choose Immutability Options for Backups](https://raw.githubusercontent.com/minio/minio/master/docs/integrations/veeam/screenshots/backup_job_immutable_days.png)
+![Choose Immutability Options for Backups](screenshots/backup_job_immutable_days.png)
 
 #### Backup Office 365 with VBO
 
@@ -70,7 +70,7 @@ mc mb -l myminio/vbo
 
 - Under Backup Infrastructure, right click on Object Storage Repositories and choose "Add object storage"
 
-![Adding Object Storage to VBO Step 1](https://raw.githubusercontent.com/minio/minio/master/docs/integrations/veeam/screenshots/1_add_object_store.png)
+![Adding Object Storage to VBO Step 1](screenshots/1_add_object_store.png)
 
 - Follow through the wizard as above for Veeam Backup and Replication as the steps are the same between both products
 
@@ -78,7 +78,7 @@ mc mb -l myminio/vbo
 
 - Follow the wizard.  Under the "Object Storage Backup Repository" section, choose the MinIO object storage you created above
 
-![Adding Object Storage to VBO Backup Repository](https://raw.githubusercontent.com/minio/minio/master/docs/integrations/veeam/screenshots/6_add_sobr_with_object_store.png)
+![Adding Object Storage to VBO Backup Repository](screenshots/6_add_sobr_with_object_store.png)
 
 - When you create your backup job, choose the backup repository you created above.
 

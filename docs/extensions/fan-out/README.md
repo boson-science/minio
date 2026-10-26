@@ -1,4 +1,4 @@
-# Fan-Out Uploads [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# Fan-Out Uploads
 
 ## Overview
 
@@ -13,6 +13,4 @@ Fan-Out uploads are automatically enabled if `x-minio-fanout-list` form-field is
 ```
 PutObjectFanOut(ctx context.Context, bucket string, fanOutContent io.Reader, fanOutReq minio.PutObjectFanOutRequest) ([]minio.PutObjectFanOutResponse, error)
 ```
-
-
 

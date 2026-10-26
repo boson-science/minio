@@ -1,4 +1,4 @@
-# MinIO Security Overview [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# MinIO Security Overview
 
 ## Server-Side Encryption
 
@@ -148,7 +148,6 @@ The MinIO server supports key rotation for SSE-S3 encrypted objects. The minio s
                     |                    +----------------+            |
                     |                                                  |
 
-
 1a) Send encrypted data key and master key ID to KMS.
 1b) Receive decrypted data key.
 2)  Decrypt encrypted object key with the KEK derived from the data key.
@@ -158,7 +157,7 @@ The MinIO server supports key rotation for SSE-S3 encrypted objects. The minio s
 5)  Store the encrypted OEK encrypted data key and master key ID in object metadata.
  ```
 
-Only the root/admin user can perform an SSE-S3 key rotation using the Admin-API via [mc](https://github.com/minio/mc). For more details about how to perform key management operations using the CLI refer to [mc admin guide](https://github.com/minio/mc/blob/master/docs/minio-admin-complete-guide.md) or run `mc admin kms key`.
+Only the root/admin user can perform an SSE-S3 key rotation using the Admin-API via [mc](https://github.com/minio/mc). For more details about how to perform key management operations using the CLI refer to [mc admin guide](https://docs.min.io/community/minio-object-store/reference/minio-mc-admin.html) or run `mc admin kms key`.
 
 #### Secure Erasure and Locking
 

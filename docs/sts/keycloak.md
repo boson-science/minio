@@ -1,11 +1,11 @@
-# Keycloak Quickstart Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# Keycloak Quickstart Guide
 
 Keycloak is an open source Identity and Access Management solution aimed at modern applications and services, this document covers configuring Keycloak identity provider support with MinIO.
 
 ## Prerequisites
 
-Configure and install keycloak server by following [Keycloak Installation Guide](https://www.keycloak.org/docs/latest/server_installation/#installing-the-software).
-For a quick installation, docker-compose reference configs are also available on the [Keycloak GitHub](https://github.com/keycloak/keycloak-containers/tree/main/docker-compose-examples).
+Configure and install keycloak server by following [Keycloak Installation Guide](https://www.keycloak.org/server/containers).
+For a quick installation, docker-compose reference configs are also available on the [Keycloak GitHub](https://www.keycloak.org/getting-started/getting-started-docker).
 
 ### Configure Keycloak Realm
 

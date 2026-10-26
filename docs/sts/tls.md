@@ -1,4 +1,4 @@
-# AssumeRoleWithCertificate [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# AssumeRoleWithCertificate
 
 ## Introduction
 
