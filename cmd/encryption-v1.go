@@ -43,6 +43,7 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/logger"
+	"github.com/minio/pkg/v3/policy"
 	"github.com/minio/sio"
 )
 
@@ -1008,7 +1009,9 @@ func DecryptObjectInfo(info *ObjectInfo, r *http.Request) (encrypted bool, err e
 	if encrypted {
 		if crypto.SSEC.IsEncrypted(info.UserDefined) {
 			if !crypto.SSEC.IsRequested(headers) && !crypto.SSECopy.IsRequested(headers) {
-				if r.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
+				// only replicators may read SSE-C objects without the key
+				hdr := replicationSafeHeader(r.Context(), r, info.Bucket, info.Name, policy.ReplicateObjectAction)
+				if hdr.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
 					return encrypted, errEncryptedObject
 				}
 			}

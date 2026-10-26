@@ -74,9 +74,6 @@ const (
 // and must not set by clients
 func containsReservedMetadata(header http.Header) bool {
 	for key := range header {
-		if _, ok := validSSEReplicationHeaders[key]; ok {
-			return false
-		}
 		if stringsHasPrefixFold(key, ReservedMetadataPrefix) {
 			return true
 		}

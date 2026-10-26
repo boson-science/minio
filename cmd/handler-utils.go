@@ -25,6 +25,7 @@ import (
 	"net/textproto"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/minio/madmin-go/v3"
@@ -34,6 +35,7 @@ import (
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
 	xnet "github.com/minio/pkg/v3/net"
+	"github.com/minio/pkg/v3/policy"
 )
 
 const (
@@ -83,13 +85,6 @@ var supportedHeaders = []string{
 	xhttp.AmzStorageClass,
 	xhttp.AmzObjectTagging,
 	"expires",
-	xhttp.AmzBucketReplicationStatus,
-	"X-Minio-Replication-Server-Side-Encryption-Sealed-Key",
-	"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm",
-	"X-Minio-Replication-Server-Side-Encryption-Iv",
-	"X-Minio-Replication-Encrypted-Multipart",
-	"X-Minio-Replication-Actual-Object-Size",
-	ReplicationSsecChecksumHeader,
 	// Add more supported headers here.
 }
 
@@ -103,7 +98,13 @@ var validSSEReplicationHeaders = map[string]string{
 	// Add more supported headers here.
 }
 
-// mapping of replication headers to internal headers
+// mapping of replication headers to internal headers.
+//
+// These headers carry internal object metadata (SSE seal parameters, actual
+// object size and the encrypted SSE-C checksum) from a replication source.
+// They are never extracted as regular metadata and are only honoured from
+// the headers of authorized replication requests, see
+// replicationMetadataAllowed and extractReplicationMetadata.
 var replicationToInternalHeaders = map[string]string{
 	"X-Minio-Replication-Server-Side-Encryption-Sealed-Key":     "X-Minio-Internal-Server-Side-Encryption-Sealed-Key",
 	"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm": "X-Minio-Internal-Server-Side-Encryption-Seal-Algorithm",
@@ -207,11 +208,7 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 	for _, supportedHeader := range supportedHeaders {
 		value, ok := nv[http.CanonicalHeaderKey(supportedHeader)]
 		if ok {
-			if v, ok := replicationToInternalHeaders[supportedHeader]; ok {
-				m[v] = strings.Join(value, ",")
-			} else {
-				m[supportedHeader] = strings.Join(value, ",")
-			}
+			m[supportedHeader] = strings.Join(value, ",")
 		}
 	}
 
@@ -228,6 +225,163 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 		}
 	}
 	return nil
+}
+
+// replicationOnlyHeaders are request headers through which a replication
+// source transfers the state of an object to its replica. Together with
+// replicationToInternalHeaders they are honoured only for principals that
+// are allowed to replicate, see replicationSafeHeader.
+var replicationOnlyHeaders = []string{
+	xhttp.MinIOSourceReplicationRequest,
+	xhttp.AmzBucketReplicationStatus,
+	xhttp.MinIOSourceETag,
+	xhttp.MinIOSourceMTime,
+	xhttp.MinIOSourceDeleteMarker,
+	xhttp.MinIOSourceDeleteMarkerDelete,
+	xhttp.MinIOSourceTaggingTimestamp,
+	xhttp.MinIOSourceObjectRetentionTimestamp,
+	xhttp.MinIOSourceObjectLegalHoldTimestamp,
+	xhttp.MinIOCheckDMReplicationReady,
+}
+
+// hasReplicationOnlyHeaders returns true if the header contains any
+// replication-only header.
+func hasReplicationOnlyHeaders(h http.Header) bool {
+	for _, k := range replicationOnlyHeaders {
+		if _, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			return true
+		}
+	}
+	return hasReplicationMetadata(h)
+}
+
+// withoutReplicationOnlyHeaders returns a copy of h without any
+// replication-only headers.
+func withoutReplicationOnlyHeaders(h http.Header) http.Header {
+	h = h.Clone()
+	for _, k := range replicationOnlyHeaders {
+		h.Del(k)
+	}
+	for k := range replicationToInternalHeaders {
+		h.Del(k)
+	}
+	return h
+}
+
+// replicationSafeHeader returns the headers of r that may be honoured for
+// bucket/object. Replication-only headers are kept only if the requester
+// is allowed the replication action (s3:ReplicateObject or
+// s3:ReplicateDelete), otherwise a copy of r.Header without them is
+// returned. r.Header itself is never modified, it may be covered by the
+// request signature.
+func replicationSafeHeader(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) http.Header {
+	if !hasReplicationOnlyHeaders(r.Header) {
+		return r.Header
+	}
+	if replicationAllowed(ctx, r, bucket, object, action) {
+		return r.Header
+	}
+	return withoutReplicationOnlyHeaders(r.Header)
+}
+
+type replicationAuthKey struct {
+	bucket, object string
+	action         policy.Action
+}
+
+// replicationAuthCache caches replication permission decisions of a
+// request, see newContext.
+type replicationAuthCache struct {
+	mu sync.Mutex
+	m  map[replicationAuthKey]bool
+}
+
+type replicationAuthCacheKey struct{}
+
+// withReplicationAuthCache returns ctx with an empty replication permission cache.
+func withReplicationAuthCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replicationAuthCacheKey{}, &replicationAuthCache{})
+}
+
+// replicationAllowed returns true if the requester is allowed the
+// replication action (s3:ReplicateObject or s3:ReplicateDelete) on
+// bucket/object. The decision is cached in ctx, if it has a cache.
+func replicationAllowed(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) bool {
+	cache, _ := ctx.Value(replicationAuthCacheKey{}).(*replicationAuthCache)
+	key := replicationAuthKey{bucket: bucket, object: object, action: action}
+	if cache != nil {
+		cache.mu.Lock()
+		allowed, ok := cache.m[key]
+		cache.mu.Unlock()
+		if ok {
+			return allowed
+		}
+	}
+	allowed := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, action) == ErrNone
+	if cache != nil {
+		cache.mu.Lock()
+		if cache.m == nil {
+			cache.m = make(map[replicationAuthKey]bool)
+		}
+		cache.m[key] = allowed
+		cache.mu.Unlock()
+	}
+	return allowed
+}
+
+// checkReplicationRequestClaim rejects requests that claim to be
+// replication requests (X-Minio-Source-Replication-Request) for writes to
+// bucket/object from principals not allowed s3:ReplicateObject, instead
+// of silently dropping the replicated object state.
+func checkReplicationRequestClaim(ctx context.Context, r *http.Request, bucket, object string) APIErrorCode {
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; !ok {
+		return ErrNone
+	}
+	if !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
+		return ErrAccessDenied
+	}
+	return ErrNone
+}
+
+// hasReplicationMetadata returns true if the header contains any of the
+// replication-only metadata headers.
+func hasReplicationMetadata(h http.Header) bool {
+	for k := range replicationToInternalHeaders {
+		if _, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// replicationMetadataAllowed reports whether the replication-only metadata
+// headers of r may be honoured. This is only the case for replication
+// requests (X-Minio-Source-Replication-Request: true) sent by a principal
+// allowed to perform s3:ReplicateObject on the object.
+//
+// If r is marked as a replication request but the principal is not
+// allowed to replicate, the corresponding error is returned. If r is not
+// marked as a replication request, false is returned and the
+// replication-only metadata must be ignored.
+func replicationMetadataAllowed(ctx context.Context, r *http.Request, bucket, object string) (bool, APIErrorCode) {
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; !ok {
+		return false, ErrNone
+	}
+	if !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
+		return false, ErrAccessDenied
+	}
+	return r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true", ErrNone
+}
+
+// extractReplicationMetadata copies the replication-only metadata headers
+// into m using their internal metadata names. Callers must verify with
+// replicationMetadataAllowed that the request may set them.
+func extractReplicationMetadata(h http.Header, m map[string]string) {
+	for k, internal := range replicationToInternalHeaders {
+		if v, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			m[internal] = strings.Join(v, ",")
+		}
+	}
 }
 
 // Returns access credentials in the request Authorization header.
@@ -264,7 +418,20 @@ func extractReqParams(r *http.Request) map[string]string {
 		m["range"] = rangeField
 	}
 
-	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
+	return m
+}
+
+// extractObjectReqParams is like extractReqParams for events on
+// bucket/object. Events of replication requests are not notified, the
+// request is treated as one only if the requester is allowed the
+// replication action (s3:ReplicateObject or s3:ReplicateDelete) on
+// bucket/object.
+func extractObjectReqParams(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) map[string]string {
+	m := extractReqParams(r)
+	if m == nil {
+		return nil
+	}
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok && replicationAllowed(ctx, r, bucket, object, action) {
 		m[xhttp.MinIOSourceReplicationRequest] = ""
 	}
 	return m

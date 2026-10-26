@@ -269,7 +269,9 @@ func checkPutObjectLockAllowed(ctx context.Context, rq *http.Request, bucket, ob
 		return mode, retainDate, legalHold, toAPIErrorCode(ctx, err)
 	}
 
-	replica := rq.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String()
+	// replication-only headers are honoured only from replicators
+	hdr := replicationSafeHeader(ctx, rq, bucket, object, policy.ReplicateObjectAction)
+	replica := hdr.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String()
 
 	if opts.VersionID != "" && !replica {
 		if objInfo, err := getObjectInfoFn(ctx, bucket, object, opts); err == nil {
@@ -307,7 +309,7 @@ func checkPutObjectLockAllowed(ctx context.Context, rq *http.Request, bucket, ob
 		if err != nil {
 			return mode, retainDate, legalHold, toAPIErrorCode(ctx, err)
 		}
-		rMode, rDate, err := objectlock.ParseObjectLockRetentionHeaders(rq.Header)
+		rMode, rDate, err := objectlock.ParseObjectLockRetentionHeaders(hdr)
 		if err != nil && (!replica || rMode != "" || !rDate.IsZero()) {
 			return mode, retainDate, legalHold, toAPIErrorCode(ctx, err)
 		}

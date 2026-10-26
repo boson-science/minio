@@ -303,7 +303,7 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 		EventName:    event.ObjectAccessedGet,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -570,7 +570,7 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 		EventName:    event.ObjectAccessedGet,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -703,7 +703,7 @@ func (api objectAPIHandlers) getObjectAttributesHandler(ctx context.Context, obj
 		EventName:    event.ObjectAccessedAttributes,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -975,7 +975,7 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 		EventName:    event.ObjectAccessedHead,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -1178,6 +1178,20 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if s3Err := checkReplicationRequestClaim(ctx, r, dstBucket, dstObject); s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
+	// Creating a replica requires s3:ReplicateObject, like PutObject.
+	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
+		if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), dstBucket, dstObject, r, policy.ReplicateObjectAction); s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	}
+	// replication-only headers are honoured only from replicators
+	replHdr := replicationSafeHeader(ctx, r, dstBucket, dstObject, policy.ReplicateObjectAction)
+
 	// Read escaped copy source path to check for parameters.
 	cpSrcPath := r.Header.Get(xhttp.AmzCopySource)
 	var vid string
@@ -1196,6 +1210,9 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 
 	// Sanitize the source object name similar to NewMultipart and PutObject API
 	srcObject = trimLeadingSlash(srcObject)
+
+	// reading the source without decryption is allowed only for replicators
+	srcReplHdr := replicationSafeHeader(ctx, r, srcBucket, srcObject, policy.ReplicateObjectAction)
 
 	if vid != "" && vid != nullVersionID {
 		_, err := uuid.Parse(vid)
@@ -1252,7 +1269,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		VersionID:          srcOpts.VersionID,
 		Versioned:          srcOpts.Versioned,
 		VersionSuspended:   srcOpts.VersionSuspended,
-		ReplicationRequest: r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true",
+		ReplicationRequest: srcReplHdr.Get(xhttp.MinIOSourceReplicationRequest) == "true",
 	}
 	getSSE := encrypt.SSE(srcOpts.ServerSideEncryption)
 	if getSSE != srcOpts.ServerSideEncryption {
@@ -1380,7 +1397,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Encryption parameters not present for this object.
-	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && r.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
+	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && srcReplHdr.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidSSECustomerAlgorithm), r.URL)
 		return
 	}
@@ -1628,7 +1645,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
-	if rs := r.Header.Get(xhttp.AmzBucketReplicationStatus); rs != "" {
+	if rs := replHdr.Get(xhttp.AmzBucketReplicationStatus); rs != "" {
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		srcInfo.UserDefined[xhttp.AmzBucketReplicationStatus] = rs
@@ -1767,7 +1784,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		EventName:    event.ObjectCreatedCopy,
 		BucketName:   dstBucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, dstBucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -1928,11 +1945,26 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
+	if s3Err := checkReplicationRequestClaim(ctx, r, bucket, object); s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
+	if hasReplicationMetadata(r.Header) {
+		replMeta, s3Err := replicationMetadataAllowed(ctx, r, bucket, object)
+		if s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+		if replMeta {
+			extractReplicationMetadata(r.Header, metadata)
+		}
+	}
 	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
 		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
+		metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		defer globalReplicationStats.Load().UpdateReplicaStat(bucket, size)
@@ -2158,7 +2190,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		EventName:    event.ObjectCreatedPut,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -2287,6 +2319,10 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
+	if s3Err = checkReplicationRequestClaim(ctx, r, bucket, opts.prefixAll); s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
 
 	switch rAuthType {
 	case authTypeStreamingSigned, authTypeStreamingSignedTrailer:
@@ -2352,7 +2388,6 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	getObjectInfo := objectAPI.GetObjectInfo
 
 	// These are static for all objects extracted.
-	reqParams := extractReqParams(r)
 	respElements := map[string]string{
 		"requestId": w.Header().Get(xhttp.AmzRequestID),
 		"nodeId":    w.Header().Get(xhttp.AmzRequestHostID),
@@ -2366,6 +2401,11 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.PutObjectAction); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return errors.New(errorCodes.ToAPIErr(s3Err).Code)
+		}
+		// The prefix-level check above only rejects early, replication
+		// permissions may differ per object.
+		if checkReplicationRequestClaim(ctx, r, bucket, object) != ErrNone {
+			return PrefixAccessDenied{Bucket: bucket, Object: object}
 		}
 		metadata := map[string]string{
 			xhttp.AmzStorageClass: sc, // save same storage-class as incoming stream.
@@ -2404,6 +2444,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
 				return errors.New(errorCodes.ToAPIErr(s3Err).Code)
 			}
+			metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		}
@@ -2430,9 +2471,16 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 				return err
 			}
 			maps.Copy(metadata, m)
+			// replication-only PAX records are honoured only from replicators
+			if hasReplicationOnlyHeaders(hdrs) && !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
+				if _, ok := hdrs[xhttp.MinIOSourceReplicationRequest]; ok {
+					return PrefixAccessDenied{Bucket: bucket, Object: object}
+				}
+				hdrs = withoutReplicationOnlyHeaders(hdrs)
+			}
 		} else {
 			versionID = r.Form.Get(xhttp.VersionID)
-			hdrs = r.Header
+			hdrs = replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
 		}
 
 		opts, err := putOpts(ctx, bucket, object, versionID, hdrs, metadata)
@@ -2528,7 +2576,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			EventName:    event.ObjectCreatedPut,
 			BucketName:   bucket,
 			Object:       objInfo,
-			ReqParams:    reqParams,
+			ReqParams:    extractObjectReqParams(ctx, r, bucket, object, policy.ReplicateObjectAction),
 			RespElements: respElements,
 			UserAgent:    r.UserAgent(),
 			Host:         handlers.GetSourceIP(r),
@@ -2695,7 +2743,7 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 				EventName:    event.ObjectRemovedNoOP,
 				BucketName:   bucket,
 				Object:       objInfo,
-				ReqParams:    extractReqParams(r),
+				ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateDeleteAction),
 				RespElements: extractRespElements(w),
 				UserAgent:    r.UserAgent(),
 				Host:         handlers.GetSourceIP(r),
@@ -2725,7 +2773,7 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 		EventName:    eventName,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateDeleteAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -2848,7 +2896,7 @@ func (api objectAPIHandlers) PutObjectLegalHoldHandler(w http.ResponseWriter, r 
 		EventName:    event.ObjectCreatedPutLegalHold,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -2910,7 +2958,7 @@ func (api objectAPIHandlers) GetObjectLegalHoldHandler(w http.ResponseWriter, r 
 		EventName:    event.ObjectAccessedGetLegalHold,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -3017,7 +3065,7 @@ func (api objectAPIHandlers) PutObjectRetentionHandler(w http.ResponseWriter, r 
 		EventName:    event.ObjectCreatedPutRetention,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -3078,7 +3126,7 @@ func (api objectAPIHandlers) GetObjectRetentionHandler(w http.ResponseWriter, r 
 		EventName:    event.ObjectAccessedGetRetention,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -3251,7 +3299,7 @@ func (api objectAPIHandlers) PutObjectTaggingHandler(w http.ResponseWriter, r *h
 				sendEvent(eventArgs{
 					EventName:    event.ObjectCreatedPutTagging,
 					BucketName:   bucket,
-					ReqParams:    extractReqParams(r),
+					ReqParams:    extractObjectReqParams(ctx, r, bucket, object, policy.ReplicateObjectAction),
 					RespElements: extractRespElements(w),
 					UserAgent:    r.UserAgent(),
 					Host:         handlers.GetSourceIP(r),
@@ -3293,7 +3341,7 @@ func (api objectAPIHandlers) PutObjectTaggingHandler(w http.ResponseWriter, r *h
 		EventName:    event.ObjectCreatedPutTagging,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -3349,7 +3397,7 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 					EventName:    event.ObjectCreatedDeleteTagging,
 					BucketName:   bucket,
 					Object:       oi,
-					ReqParams:    extractReqParams(r),
+					ReqParams:    extractObjectReqParams(ctx, r, bucket, oi.Name, policy.ReplicateObjectAction),
 					RespElements: extractRespElements(w),
 					UserAgent:    r.UserAgent(),
 					Host:         handlers.GetSourceIP(r),
@@ -3398,7 +3446,7 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 		EventName:    event.ObjectCreatedDeleteTagging,
 		BucketName:   bucket,
 		Object:       oi,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, oi.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
@@ -3520,7 +3568,7 @@ func (api objectAPIHandlers) PostRestoreObjectHandler(w http.ResponseWriter, r *
 		EventName:  event.ObjectRestorePost,
 		BucketName: bucket,
 		Object:     objInfo,
-		ReqParams:  extractReqParams(r),
+		ReqParams:  extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		UserAgent:  r.UserAgent(),
 		Host:       handlers.GetSourceIP(r),
 	})
@@ -3589,7 +3637,7 @@ func (api objectAPIHandlers) PostRestoreObjectHandler(w http.ResponseWriter, r *
 			EventName:  event.ObjectRestoreCompleted,
 			BucketName: bucket,
 			Object:     objInfo,
-			ReqParams:  extractReqParams(r),
+			ReqParams:  extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 			UserAgent:  r.UserAgent(),
 			Host:       handlers.GetSourceIP(r),
 		})

@@ -30,6 +30,7 @@ import (
 	"github.com/minio/minio/internal/crypto"
 	"github.com/minio/minio/internal/hash"
 	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/pkg/v3/policy"
 )
 
 func getDefaultOpts(header http.Header, copySource bool, metadata map[string]string) (opts ObjectOptions, err error) {
@@ -109,21 +110,26 @@ func getOpts(ctx context.Context, r *http.Request, bucket, object string) (Objec
 		}
 	}
 
+	// replication-only headers are honoured only from replicators
+	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
+
 	// default case of passing encryption headers to backend
-	opts, err = getDefaultOpts(r.Header, false, nil)
+	opts, err = getDefaultOpts(hdr, false, nil)
 	if err != nil {
 		return opts, err
 	}
 	opts.PartNumber = partNumber
 	opts.VersionID = vid
 
-	delMarker, err := parseBoolHeader(bucket, object, r.Header, xhttp.MinIOSourceDeleteMarker)
+	delMarker, err := parseBoolHeader(bucket, object, hdr, xhttp.MinIOSourceDeleteMarker)
 	if err != nil {
 		return opts, err
 	}
 	opts.DeleteMarker = delMarker
 
-	replReadyCheck, err := parseBoolHeader(bucket, object, r.Header, xhttp.MinIOCheckDMReplicationReady)
+	// only sent ahead of delete marker replication
+	dmHdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateDeleteAction)
+	replReadyCheck, err := parseBoolHeader(bucket, object, dmHdr, xhttp.MinIOCheckDMReplicationReady)
 	if err != nil {
 		return opts, err
 	}
@@ -297,13 +303,17 @@ func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts 
 		opts.VersionID = nullVersionID
 	}
 
-	delMarker, err := parseBoolHeader(bucket, object, r.Header, xhttp.MinIOSourceDeleteMarker)
+	// replication-only headers are honoured only from delete replicators
+	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateDeleteAction)
+	_, opts.ReplicationRequest = hdr[xhttp.MinIOSourceReplicationRequest]
+
+	delMarker, err := parseBoolHeader(bucket, object, hdr, xhttp.MinIOSourceDeleteMarker)
 	if err != nil {
 		return opts, err
 	}
 	opts.DeleteMarker = delMarker
 
-	mtime := strings.TrimSpace(r.Header.Get(xhttp.MinIOSourceMTime))
+	mtime := strings.TrimSpace(hdr.Get(xhttp.MinIOSourceMTime))
 	if mtime != "" {
 		opts.MTime, err = time.Parse(time.RFC3339Nano, mtime)
 		if err != nil {
@@ -319,7 +329,8 @@ func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts 
 
 // get ObjectOptions for PUT calls from encryption headers and metadata
 func putOptsFromReq(ctx context.Context, r *http.Request, bucket, object string, metadata map[string]string) (opts ObjectOptions, err error) {
-	return putOpts(ctx, bucket, object, r.Form.Get(xhttp.VersionID), r.Header, metadata)
+	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
+	return putOpts(ctx, bucket, object, r.Form.Get(xhttp.VersionID), hdr, metadata)
 }
 
 func putOpts(ctx context.Context, bucket, object, vid string, hdrs http.Header, metadata map[string]string) (opts ObjectOptions, err error) {
@@ -447,7 +458,8 @@ func copySrcOpts(ctx context.Context, r *http.Request, bucket, object string) (O
 	var opts ObjectOptions
 
 	// default case of passing encryption headers to backend
-	opts, err := getDefaultOpts(r.Header, false, nil)
+	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
+	opts, err := getDefaultOpts(hdr, false, nil)
 	if err != nil {
 		return opts, err
 	}
@@ -456,7 +468,8 @@ func copySrcOpts(ctx context.Context, r *http.Request, bucket, object string) (O
 
 // get ObjectOptions for CompleteMultipart calls
 func completeMultipartOpts(ctx context.Context, r *http.Request, bucket, object string) (opts ObjectOptions, err error) {
-	mtimeStr := strings.TrimSpace(r.Header.Get(xhttp.MinIOSourceMTime))
+	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
+	mtimeStr := strings.TrimSpace(hdr.Get(xhttp.MinIOSourceMTime))
 	var mtime time.Time
 	if mtimeStr != "" {
 		mtime, err = time.Parse(time.RFC3339Nano, mtimeStr)
@@ -485,12 +498,15 @@ func completeMultipartOpts(ctx context.Context, r *http.Request, bucket, object 
 			}
 		}
 	}
-	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
+	// The replicated actual size and SSE-C checksum are only accepted from
+	// authorized replication requests. Otherwise the request is completed
+	// like a regular upload and the server computes these values.
+	if replMeta, _ := replicationMetadataAllowed(ctx, r, bucket, object); replMeta {
 		opts.ReplicationRequest = true
 		opts.UserDefined[ReservedMetadataPrefix+"Actual-Object-Size"] = r.Header.Get(xhttp.MinIOReplicationActualObjectSize)
-	}
-	if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
-		opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+		if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
+			opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+		}
 	}
 	return opts, nil
 }
