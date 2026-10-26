@@ -284,3 +284,5 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace github.com/minio/console => github.com/boson-science/console v0.0.0-20261026160821-52e4e49b9c55

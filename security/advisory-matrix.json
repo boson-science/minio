@@ -1,7 +1,7 @@
 {
   "release": "next",
   "upstream_base": "minio/minio master 7aac2a2c (after RELEASE.2025-10-15T17-29-55Z)",
-  "console": "github.com/minio/console v1.7.6",
+  "console": "github.com/boson-science/console v0.0.0-20261026160821-52e4e49b9c55 (v1.7.6 + login CSRF fix)",
   "policy": "Every applicable advisory must have a reviewed fix and a negative regression test before a release tag can publish.",
   "advisories": [
     {"id":"GHSA-jjjj-jwhf-8rgr","status":"requires-review"},
