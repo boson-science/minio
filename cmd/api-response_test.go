@@ -130,7 +130,8 @@ func TestGetURLScheme(t *testing.T) {
 func TestTrackingResponseWriter(t *testing.T) {
 	rw := httptest.NewRecorder()
 	trw := &trackingResponseWriter{ResponseWriter: rw}
-	trw.WriteHeader(123)
+	// Any status that allows a body; 1xx responses do not.
+	trw.WriteHeader(299)
 	if !trw.headerWritten {
 		t.Fatal("headerWritten was not set by WriteHeader call")
 	}
@@ -142,7 +143,7 @@ func TestTrackingResponseWriter(t *testing.T) {
 
 	// Check that WriteHeader and Write were called on the underlying response writer
 	resp := rw.Result()
-	if resp.StatusCode != 123 {
+	if resp.StatusCode != 299 {
 		t.Fatalf("unexpected status: %v", resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
