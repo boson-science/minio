@@ -48,6 +48,11 @@ func (t *ldapLoginThrottle) resetForTest(now func() time.Time) {
 	t.now = now
 }
 
+// acquireS acquires with the same source for the pair and spray limits.
+func (t *ldapLoginThrottle) acquireS(username, source string) *ldapAttempt {
+	return t.acquire(username, ldapThrottleSource{pair: source, spray: source})
+}
+
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -75,7 +80,7 @@ func newTestLDAPThrottle() (*ldapLoginThrottle, *fakeClock) {
 // failN makes n failed attempts and reports how many were admitted.
 func failN(th *ldapLoginThrottle, user, source string, n int) (admitted int) {
 	for range n {
-		if th.acquire(user, source) != nil {
+		if th.acquireS(user, source) != nil {
 			admitted++
 		}
 	}
@@ -103,11 +108,11 @@ func TestLDAPThrottlePairBackoff(t *testing.T) {
 		t.Fatalf("expected %d admitted attempts, got %d", free, n)
 	}
 	// Username normalization: case and surrounding space do not matter.
-	if th.acquire("  ALICE ", "10.0.0.1") != nil {
+	if th.acquireS("  ALICE ", "10.0.0.1") != nil {
 		t.Fatal("normalized username must share the pair counter")
 	}
 	// The same user from another source is not affected.
-	if a := th.acquire("alice", "10.0.0.2"); a == nil {
+	if a := th.acquireS("alice", "10.0.0.2"); a == nil {
 		t.Fatal("victim from another source must not be blocked")
 	} else {
 		a.succeeded()
@@ -116,15 +121,15 @@ func TestLDAPThrottlePairBackoff(t *testing.T) {
 	// Backoff grows: one attempt after the first window, then a window
 	// twice as long.
 	clk.advance(ldapThrottlePairPolicy.baseDelay)
-	if th.acquire("alice", "10.0.0.1") == nil {
+	if th.acquireS("alice", "10.0.0.1") == nil {
 		t.Fatal("attempt after first backoff window should be admitted")
 	}
 	clk.advance(ldapThrottlePairPolicy.baseDelay)
-	if th.acquire("alice", "10.0.0.1") != nil {
+	if th.acquireS("alice", "10.0.0.1") != nil {
 		t.Fatal("second backoff window should be longer than the first")
 	}
 	clk.advance(ldapThrottlePairPolicy.baseDelay)
-	a := th.acquire("alice", "10.0.0.1")
+	a := th.acquireS("alice", "10.0.0.1")
 	if a == nil {
 		t.Fatal("attempt after second backoff window should be admitted")
 	}
@@ -142,28 +147,28 @@ func TestLDAPThrottleUserCeiling(t *testing.T) {
 
 	// Distributed guessing: one failure per source.
 	for i := range ceiling {
-		if th.acquire("alice", fmt.Sprint("10.1.", i/250, ".", i%250)) == nil {
+		if th.acquireS("alice", fmt.Sprint("10.1.", i/250, ".", i%250)) == nil {
 			t.Fatalf("attempt %d below the ceiling should be admitted", i+1)
 		}
 	}
-	if th.acquire("alice", "10.9.9.9") != nil {
+	if th.acquireS("alice", "10.9.9.9") != nil {
 		t.Fatal("user ceiling must apply across sources")
 	}
 
 	// A success does not reset the ceiling (only the pair).
 	clk.advance(ldapThrottleUserPolicy.baseDelay)
-	a := th.acquire("alice", "10.9.9.9")
+	a := th.acquireS("alice", "10.9.9.9")
 	if a == nil {
 		t.Fatal("attempt after ceiling backoff should be admitted")
 	}
 	a.succeeded()
-	if th.acquire("alice", "10.9.9.8") != nil {
+	if th.acquireS("alice", "10.9.9.8") != nil {
 		t.Fatal("success must not reset the per-user ceiling")
 	}
 
 	// The ceiling is a fixed window: it resets after the window passes.
 	clk.advance(ldapThrottleEntryTTL + ldapThrottleUserPolicy.maxDelay + time.Second)
-	if th.acquire("alice", "10.9.9.7") == nil {
+	if th.acquireS("alice", "10.9.9.7") == nil {
 		t.Fatal("ceiling should reset after its window")
 	}
 }
@@ -173,21 +178,21 @@ func TestLDAPThrottleSourceSpray(t *testing.T) {
 	limit := ldapThrottleSourcePolicy.freeAttempts
 
 	for i := range limit {
-		if th.acquire(fmt.Sprint("user", i), "10.0.0.1") == nil {
+		if th.acquireS(fmt.Sprint("user", i), "10.0.0.1") == nil {
 			t.Fatalf("distinct user %d below the spray limit should be admitted", i)
 		}
 	}
-	if th.acquire("another", "10.0.0.1") != nil {
+	if th.acquireS("another", "10.0.0.1") != nil {
 		t.Fatal("source spraying usernames must be throttled")
 	}
-	if th.acquire("another", "10.0.0.2") == nil {
+	if th.acquireS("another", "10.0.0.2") == nil {
 		t.Fatal("other sources must not be throttled")
 	}
 
 	// Repeated attempts for one user count against the pair only.
 	th2, _ := newTestLDAPThrottle()
 	failN(th2, "alice", "10.0.0.1", 50)
-	if th2.acquire("bob", "10.0.0.1") == nil {
+	if th2.acquireS("bob", "10.0.0.1") == nil {
 		t.Fatal("repeated failures for one user must not count as spraying")
 	}
 }
@@ -196,7 +201,7 @@ func TestLDAPThrottleRefund(t *testing.T) {
 	th, _ := newTestLDAPThrottle()
 	// LDAP outages do not count as failed attempts.
 	for range 3 * ldapThrottleUserPolicy.freeAttempts {
-		a := th.acquire("alice", "10.0.0.1")
+		a := th.acquireS("alice", "10.0.0.1")
 		if a == nil {
 			t.Fatal("refunded attempts must not cause throttling")
 		}
@@ -208,15 +213,15 @@ func TestLDAPThrottleRefund(t *testing.T) {
 }
 
 func TestLDAPThrottleSourceIgnoresHeaders(t *testing.T) {
-	testCases := map[string]string{
-		"10.1.2.3:4567":                 "10.1.2.3",
-		"[2001:db8:1:2:3:4:5:6]:9000":   "2001:db8:1:2::/64",
-		"[2001:db8:1:2:ffff::1]:9000":   "2001:db8:1:2::/64",
-		"[::ffff:192.0.2.1]:80":         "192.0.2.1",
-		"[fe80::1%eth0]:80":             "fe80::/64",
-		"10.1.2.3":                      "10.1.2.3",
-		"not-an-ip:80":                  "invalid",
-		strings.Repeat("x", 8000) + ":": "invalid",
+	testCases := map[string]ldapThrottleSource{
+		"10.1.2.3:4567":                 {"10.1.2.3", "10.1.2.3"},
+		"[2001:db8:1:2:3:4:5:6]:9000":   {"2001:db8:1:2::/64", "2001:db8:1::/48"},
+		"[2001:db8:1:ff:ffff::1]:9000":  {"2001:db8:1:ff::/64", "2001:db8:1::/48"},
+		"[::ffff:192.0.2.1]:80":         {"192.0.2.1", "192.0.2.1"},
+		"[fe80::1%eth0]:80":             {"fe80::/64", "fe80::/48"},
+		"10.1.2.3":                      {"10.1.2.3", "10.1.2.3"},
+		"not-an-ip:80":                  {"invalid", "invalid"},
+		strings.Repeat("x", 8000) + ":": {"invalid", "invalid"},
 	}
 	for remote, want := range testCases {
 		r := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -225,9 +230,46 @@ func TestLDAPThrottleSourceIgnoresHeaders(t *testing.T) {
 		r.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
 		r.Header.Set("X-Real-IP", "203.0.113.8")
 		r.Header.Set("Forwarded", "for=203.0.113.9")
-		if got := ldapThrottleSource(r); got != want {
-			t.Errorf("ldapThrottleSource(%q) = %q, want %q", remote, got, want)
+		if got := ldapThrottleSourceOf(r); got != want {
+			t.Errorf("ldapThrottleSourceOf(%q) = %+v, want %+v", remote, got, want)
 		}
+	}
+}
+
+func TestLDAPThrottleIPv6Grouping(t *testing.T) {
+	th, _ := newTestLDAPThrottle()
+	srcOf := func(remote string) ldapThrottleSource {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = remote
+		return ldapThrottleSourceOf(r)
+	}
+
+	// Spraying from many /64s of one /48 is limited as one source.
+	limit := ldapThrottleSourcePolicy.freeAttempts
+	for i := range limit {
+		if th.acquire(fmt.Sprint("user", i), srcOf(fmt.Sprintf("[2001:db8:1:%x::1]:1", i))) == nil {
+			t.Fatalf("distinct user %d below the spray limit should be admitted", i)
+		}
+	}
+	if th.acquire("another", srcOf("[2001:db8:1:ffff::1]:1")) != nil {
+		t.Fatal("spraying across /64s of one /48 must be throttled")
+	}
+	if th.acquire("another", srcOf("[2001:db8:2::1]:1")) == nil {
+		t.Fatal("another /48 must not be throttled")
+	}
+
+	// The (user, source) backoff uses /64: guessing from one /64 does not
+	// block the same user from a neighbouring /64.
+	th, _ = newTestLDAPThrottle()
+	free := ldapThrottlePairPolicy.freeAttempts
+	for range free {
+		th.acquire("alice", srcOf("[2001:db8:5:1::1]:1"))
+	}
+	if th.acquire("alice", srcOf("[2001:db8:5:1::2]:1")) != nil {
+		t.Fatal("addresses of one /64 must share the pair backoff")
+	}
+	if th.acquire("alice", srcOf("[2001:db8:5:2::1]:1")) == nil {
+		t.Fatal("a neighbouring /64 must not share the pair backoff")
 	}
 }
 
@@ -238,27 +280,57 @@ func TestLDAPThrottleMemoryBound(t *testing.T) {
 	// Expiry: idle entries are swept.
 	failN(th, "u", "10.0.0.1", 1)
 	clk.advance(ldapThrottleEntryTTL + ldapThrottleSweepInterval + time.Second)
-	th.acquire("fresh", "10.0.0.2")
+	th.acquireS("fresh", "10.0.0.2")
 	if n := len(th.pairs.entries); n != 1 {
 		t.Fatalf("expected expired entries to be swept, have %d pairs", n)
 	}
 
-	// A blocked attacker pair, then a flood of huge junk usernames: tables
-	// stay bounded, keys are fixed size and blocked entries are not evicted
-	// in favour of unblocked ones.
-	free := ldapThrottlePairPolicy.freeAttempts
-	failN(th, "victim", "10.0.0.66", free)
+	// Huge junk usernames from many sources: tables stay bounded (plus one
+	// shared overflow entry) and keys are fixed size.
 	junk := strings.Repeat("j", 8<<10)
 	for i := range 1000 {
-		th.acquire(fmt.Sprint(junk, i), fmt.Sprint("10.2.", i/250, ".", i%250))
+		th.acquireS(fmt.Sprint(junk, i), fmt.Sprint("10.2.", i/250, ".", i%250))
 		for _, tbl := range []*throttleTable{&th.pairs, &th.users, &th.sources} {
-			if len(tbl.entries) > th.maxEntries {
+			if len(tbl.entries) > th.maxEntries+1 {
 				t.Fatalf("throttle table exceeded its bound: %d", len(tbl.entries))
 			}
 		}
 	}
-	if th.acquire("victim", "10.0.0.66") != nil {
-		t.Fatal("blocked pair must not be evicted in favour of unblocked entries")
+}
+
+func TestLDAPThrottleFloodDoesNotResetCounters(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
+	th.maxEntries = 10
+	free := ldapThrottlePairPolicy.freeAttempts
+
+	// A blocked pair and an accumulating (not yet blocked) pair.
+	failN(th, "blocked", "10.0.0.1", free)
+	failN(th, "accumulating", "10.0.0.2", free-1)
+
+	// Flood the tables with fresh keys from many sources.
+	for i := range 1000 {
+		th.acquireS(fmt.Sprint("flood", i), fmt.Sprint("10.3.", i/250, ".", i%250))
+	}
+
+	if th.acquireS("blocked", "10.0.0.1") != nil {
+		t.Fatal("flood must not reset a blocked entry")
+	}
+	if th.acquireS("accumulating", "10.0.0.2") == nil {
+		t.Fatal("accumulating entry should still have one free attempt")
+	}
+	if th.acquireS("accumulating", "10.0.0.2") != nil {
+		t.Fatal("flood must not reset an accumulating entry")
+	}
+
+	// Keys that could not be tracked share a limited overflow counter.
+	if th.acquireS("flood-new", "10.4.0.1") != nil {
+		t.Fatal("untracked keys must be limited by the shared overflow counter")
+	}
+
+	// Once entries expire there is room again for new keys.
+	clk.advance(ldapThrottleEntryTTL + ldapThrottlePairPolicy.maxDelay + ldapThrottleSweepInterval)
+	if th.acquireS("late", "10.5.0.1") == nil {
+		t.Fatal("new keys should be tracked again after entries expire")
 	}
 }
 

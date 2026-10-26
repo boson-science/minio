@@ -709,10 +709,10 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 	// Throttle attempts before contacting the LDAP server. Rejected,
 	// unknown-user and throttled attempts all get the same generic
 	// response; details are only logged.
-	source := ldapThrottleSource(r)
+	source := ldapThrottleSourceOf(r)
 	attempt := globalLDAPLoginThrottle.acquire(ldapUsername, source)
 	if attempt == nil {
-		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source))
+		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source.pair))
 		return
 	}
 
