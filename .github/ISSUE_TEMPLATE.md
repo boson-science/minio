@@ -8,10 +8,8 @@ assignees: ''
 ---
 
 ## NOTE
-All GitHub issues are addressed on a best-effort basis at MinIO's sole discretion. There are no Service Level Agreements (SLA) or Objectives (SLO). Remember our [Code of Conduct](https://github.com/minio/minio/blob/master/code_of_conduct.md) when engaging with MinIO Engineers and the larger community.
+This is an independent, community-maintained fork of MinIO, not affiliated with MinIO, Inc. Issues are addressed on a best-effort basis; there are no Service Level Agreements (SLA) or Objectives (SLO). Do not report security vulnerabilities here; use [security advisories](https://github.com/boson-science/minio/security/advisories/new).
 
-For urgent issues (e.g. production down, etc.), subscribe to [SUBNET](https://min.io/pricing?jmp=github) for direct to engineering support.
- 
 <!--- Provide a general summary of the issue in the Title above -->
 
 ## Expected Behavior
@@ -29,7 +27,7 @@ For urgent issues (e.g. production down, etc.), subscribe to [SUBNET](https://mi
 ## Steps to Reproduce (for bugs)
 <!--- Provide a link to a live example, or an unambiguous set of steps to -->
 <!--- reproduce this bug. Include code to reproduce, if relevant -->
-<!--- and make sure you have followed https://github.com/minio/minio/tree/release/docs/debugging to capture relevant logs -->
+<!--- and make sure you have followed https://github.com/boson-science/minio/tree/master/docs/debugging to capture relevant logs -->
 
 1.
 2.

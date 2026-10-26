@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in MinIO (community edition is source-only)
+about: Report a bug in this MinIO fork
 title: ''
 labels: community, triage
 assignees: ''
@@ -9,11 +9,11 @@ assignees: ''
 
 ## IMPORTANT NOTES
 
-**Community Edition**: MinIO community edition is now source-only. Install via `go install github.com/minio/minio@latest`
+**Community fork**: This is an independent, community-maintained fork of MinIO, not affiliated with MinIO, Inc. Report issues with this fork here, not to MinIO, Inc.
 
-**Feature Requests**: We are no longer accepting feature requests for the community edition. For feature requests and enterprise support, please subscribe to [MinIO Enterprise Support](https://min.io/pricing).
+**Scope**: The fork focuses on security and maintenance fixes. Feature requests are considered on a best-effort basis.
 
-**Urgent Issues**: If this case is urgent or affects production, please subscribe to [SUBNET](https://min.io/pricing) for 24/7 enterprise support.
+**Security issues**: Do not open a public issue. Report vulnerabilities privately through [security advisories](https://github.com/boson-science/minio/security/advisories/new).
 
 <!--- Provide a general summary of the issue in the Title above -->
 
@@ -32,7 +32,7 @@ assignees: ''
 ## Steps to Reproduce (for bugs)
 <!--- Provide a link to a live example, or an unambiguous set of steps to -->
 <!--- reproduce this bug. Include code to reproduce, if relevant -->
-<!--- and make sure you have followed https://github.com/minio/minio/tree/release/docs/debugging to capture relevant logs -->
+<!--- and make sure you have followed https://github.com/boson-science/minio/tree/master/docs/debugging to capture relevant logs -->
 
 1.
 2.

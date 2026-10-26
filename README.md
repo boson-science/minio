@@ -1,9 +1,12 @@
 > [!NOTE]
-> **THIS REPOSITORY IS NO LONGER MAINTAINED.**
+> **This is an independent, community-maintained fork of MinIO.** It is not
+> affiliated with or endorsed by MinIO, Inc. Upstream
+> [minio/minio](https://github.com/minio/minio) is no longer maintained; this
+> fork continues security and maintenance releases from its final source.
 >
-> **Alternatives:**
-> - **[AIStor Free](https://min.io/download)** — Full-featured, standalone edition for community use (free license)
-> - **[AIStor Enterprise](https://min.io/pricing)** — Distributed edition with commercial support
+> - Releases follow upstream's `RELEASE.<time>` scheme. See [RELEASING.md](RELEASING.md).
+> - The embedded web console comes from [boson-science/console](https://github.com/boson-science/console).
+> - Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ---
 
