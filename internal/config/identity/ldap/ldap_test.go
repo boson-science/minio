@@ -72,6 +72,24 @@ func TestIsNetworkError(t *testing.T) {
 	}
 }
 
+func TestUnknownUserError(t *testing.T) {
+	lookupErr := errors.New("User DN not found for: alice")
+
+	// The dummy bind normally fails with invalid credentials.
+	for _, bindErr := range []error{nil, ldap.NewError(ldap.LDAPResultInvalidCredentials, errors.New("invalid"))} {
+		if err := unknownUserError(lookupErr, bindErr); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("unknown user must be invalid credentials, got %v", err)
+		}
+	}
+
+	// A network failure is an upstream error, as for a known user's bind.
+	netErr := ldap.NewError(ldap.ErrorNetwork, errors.New("connection reset"))
+	err := unknownUserError(lookupErr, netErr)
+	if errors.Is(err, ErrInvalidCredentials) || !isNetworkError(err) {
+		t.Fatalf("network failure of the dummy bind must be an upstream error, got %v", err)
+	}
+}
+
 func TestDummyBindDN(t *testing.T) {
 	l := Config{LDAP: xldap.Config{UserDNSearchBaseDistName: " ou=people,dc=min,dc=io ;ou=other,dc=min,dc=io"}}
 	dn1, dn2 := l.dummyBindDN(), l.dummyBindDN()

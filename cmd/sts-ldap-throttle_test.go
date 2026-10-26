@@ -559,6 +559,16 @@ func TestLDAPThrottleUsernameLength(t *testing.T) {
 	if !errors.Is(err, cfgldap.ErrInvalidCredentials) || called {
 		t.Fatalf("overlong username must fail like invalid credentials without LDAP, got %v (called %v)", err, called)
 	}
+
+	_, _, _, err = ldapThrottledBind("alice", strings.Repeat("p", ldapMaxPasswordLen+1), ldapThrottleSource{net: "10.0.0.3"})
+	if !errors.Is(err, cfgldap.ErrInvalidCredentials) || called {
+		t.Fatalf("overlong password must fail like invalid credentials without LDAP, got %v (called %v)", err, called)
+	}
+	if _, _, a, err := ldapThrottledBind("alice", strings.Repeat("p", ldapMaxPasswordLen), ldapThrottleSource{net: "10.0.0.3"}); err != nil || !called {
+		t.Fatalf("passwords up to the limit must reach LDAP, got %v (called %v)", err, called)
+	} else {
+		a.notCredentialFailure()
+	}
 }
 
 func TestLDAPThrottleSFTPRemoteAddr(t *testing.T) {
@@ -843,12 +853,14 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 	ldapDown.Store(false)
 	assertOK("after outage", call("alice", goodPW, attacker, false))
 
-	// 7. Overlong usernames get the generic response without reaching LDAP.
+	// 7. Overlong usernames and passwords get the generic response without
+	// reaching LDAP.
 	reset()
 	calls = bindCalls.Load()
 	assertDenied("long username", call(strings.Repeat("a", ldapMaxUsernameLen+1), "x", attacker, false))
+	assertDenied("long password", call("alice", strings.Repeat("p", ldapMaxPasswordLen+1), attacker, true))
 	if bindCalls.Load() != calls {
-		c.Fatal("overlong usernames must not reach LDAP")
+		c.Fatal("overlong usernames and passwords must not reach LDAP")
 	}
 
 	// 8. FTP LDAP logins are throttled by the client address.

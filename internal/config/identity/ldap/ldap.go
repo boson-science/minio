@@ -249,6 +249,17 @@ func isNetworkError(err error) bool {
 	return ldap.IsErrorWithCode(err, ldap.ErrorNetwork)
 }
 
+// unknownUserError returns the error of Bind for an unknown or ambiguous
+// user, given the lookup error and the result of the dummy bind. A network
+// failure of the dummy bind is reported like one of the user bind (as an
+// upstream error), so connectivity problems do not tell users apart either.
+func unknownUserError(lookupErr, dummyBindErr error) error {
+	if dummyBindErr != nil && isNetworkError(dummyBindErr) {
+		return fmt.Errorf("LDAP bind failed: %w", dummyBindErr)
+	}
+	return fmt.Errorf("%w: unable to find user DN: %v", ErrInvalidCredentials, lookupErr)
+}
+
 // dummyBindDN returns a random DN under the first configured user search base
 // that is not expected to exist in the directory.
 func (l *Config) dummyBindDN() string {
@@ -286,8 +297,7 @@ func (l *Config) Bind(username, password string) (*xldap.DNSearchResult, []strin
 		// Perform a bind that is bound to fail, so that an unknown or
 		// ambiguous username costs the same LDAP round trips (one search
 		// and one failed bind) as a known username with a wrong password.
-		_ = conn.Bind(l.dummyBindDN(), password)
-		return nil, nil, fmt.Errorf("%w: unable to find user DN: %v", ErrInvalidCredentials, err)
+		return nil, nil, unknownUserError(err, conn.Bind(l.dummyBindDN(), password))
 	}
 
 	// Authenticate the user credentials. A failure of the user bind is

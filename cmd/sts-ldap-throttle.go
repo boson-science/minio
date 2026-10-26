@@ -65,6 +65,9 @@ const (
 	// ldapMaxUsernameLen bounds login usernames; longer ones are rejected
 	// like invalid credentials.
 	ldapMaxUsernameLen = 1024
+	// ldapMaxPasswordLen bounds login passwords; longer ones are rejected
+	// like invalid credentials without contacting LDAP.
+	ldapMaxPasswordLen = 1024
 
 	// EnvLDAPSTSTrustedProxies lists comma-separated CIDRs (or addresses) of
 	// reverse proxies. Only for requests whose TCP peer is in this list, the
@@ -550,6 +553,9 @@ var ldapBindFn = func(username, password string) (*xldap.DNSearchResult, []strin
 func ldapThrottledBind(username, password string, source ldapThrottleSource) (*xldap.DNSearchResult, []string, *ldapAttempt, error) {
 	if len(username) > ldapMaxUsernameLen {
 		return nil, nil, nil, fmt.Errorf("%w (username longer than %d bytes)", errLDAPLoginThrottled, ldapMaxUsernameLen)
+	}
+	if len(password) > ldapMaxPasswordLen {
+		return nil, nil, nil, fmt.Errorf("%w (password longer than %d bytes)", errLDAPLoginThrottled, ldapMaxPasswordLen)
 	}
 	attempt := globalLDAPLoginThrottle.acquire(username, source)
 	if attempt == nil {
