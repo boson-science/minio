@@ -366,13 +366,47 @@ func TestLDAPThrottleFloodDoesNotResetCounters(t *testing.T) {
 	}
 }
 
+func TestLDAPThrottleSaltedKeys(t *testing.T) {
+	a, b := newLDAPLoginThrottle(), newLDAPLoginThrottle()
+	if a.salt == b.salt || a.salt == ([32]byte{}) {
+		t.Fatal("each throttle must have its own random salt")
+	}
+
+	const in = "pair\x00alice\x0010.0.0.1"
+	if a.key(in) != a.key(in) {
+		t.Fatal("keys must be stable within one throttle")
+	}
+	if a.key(in) == b.key(in) || a.key(in) == ldapThrottleKey(sha256.Sum256([]byte(in))) {
+		t.Fatal("keys must depend on the salt")
+	}
+
+	// Entries are stored under salted keys.
+	a.acquireS("alice", "10.0.0.1")
+	if _, ok := a.pairs.entries[a.key(in)]; !ok {
+		t.Fatal("pair entry must be stored under the salted key")
+	}
+
+	// Overflow shard assignment differs between instances.
+	same := 0
+	const n = 256
+	for i := range n {
+		s := fmt.Sprint("user\x00victim", i)
+		if ldapThrottleShard(a.key(s)) == ldapThrottleShard(b.key(s)) {
+			same++
+		}
+	}
+	// Expected about n/64 matches; all matching is practically impossible.
+	if same > n/4 {
+		t.Fatalf("shard assignment must depend on the salt: %d of %d identical", same, n)
+	}
+}
+
 func TestLDAPThrottleOverflowSharding(t *testing.T) {
 	th, _ := newTestLDAPThrottle()
 	th.maxEntries = 1
 	const src = "10.0.0.1"
 	pairShard := func(user string) int {
-		k := sha256.Sum256([]byte("pair\x00" + user + "\x00" + src))
-		return int(k[0]) % ldapThrottleOverflowShards
+		return ldapThrottleShard(th.key("pair\x00" + user + "\x00" + src))
 	}
 
 	// Fill every table so that new pairs can only be tracked in overflow

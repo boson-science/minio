@@ -18,6 +18,7 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"net"
 	"net/http"
@@ -120,10 +121,13 @@ type ldapLoginThrottle struct {
 	maxEntries int
 	lastSweep  time.Time
 	now        func() time.Time
+	// salt keys all hashes, so that clients cannot predict which entry or
+	// overflow shard a username or source maps to.
+	salt [32]byte
 }
 
 func newLDAPLoginThrottle() *ldapLoginThrottle {
-	return &ldapLoginThrottle{
+	t := &ldapLoginThrottle{
 		pairs:      throttleTable{policy: ldapThrottlePairPolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		users:      throttleTable{policy: ldapThrottleUserPolicy, fixedWindow: true, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		sources:    throttleTable{policy: ldapThrottleSourcePolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
@@ -132,6 +136,23 @@ func newLDAPLoginThrottle() *ldapLoginThrottle {
 		maxEntries: ldapThrottleMaxEntries,
 		now:        time.Now,
 	}
+	// crypto/rand.Read does not fail on supported platforms.
+	_, _ = rand.Read(t.salt[:])
+	return t
+}
+
+// ldapThrottleShard returns the overflow shard of a (salted) key.
+func ldapThrottleShard(k ldapThrottleKey) int {
+	return int(k[0]) % ldapThrottleOverflowShards
+}
+
+// key returns the salted, fixed size key of s.
+func (t *ldapLoginThrottle) key(s string) (k ldapThrottleKey) {
+	h := sha256.New()
+	h.Write(t.salt[:])
+	h.Write([]byte(s))
+	h.Sum(k[:0])
+	return k
 }
 
 func (t *ldapLoginThrottle) tables() []*throttleTable {
@@ -212,11 +233,11 @@ func (t *ldapLoginThrottle) acquire(username string, source ldapThrottleSource) 
 	}
 
 	a := &ldapAttempt{t: t, hasSite: source.site != ""}
-	a.pair, a.pairOverflow = t.slot(&t.pairs, sha256.Sum256([]byte("pair\x00"+username+"\x00"+source.net)), now)
-	a.user, _ = t.slot(&t.users, sha256.Sum256([]byte("user\x00"+username)), now)
-	a.source, _ = t.slot(&t.sources, sha256.Sum256([]byte("source\x00"+source.net)), now)
+	a.pair, a.pairOverflow = t.slot(&t.pairs, t.key("pair\x00"+username+"\x00"+source.net), now)
+	a.user, _ = t.slot(&t.users, t.key("user\x00"+username), now)
+	a.source, _ = t.slot(&t.sources, t.key("source\x00"+source.net), now)
 	if a.hasSite {
-		a.site, _ = t.slot(&t.sites, sha256.Sum256([]byte("site\x00"+source.site)), now)
+		a.site, _ = t.slot(&t.sites, t.key("site\x00"+source.site), now)
 	}
 
 	if t.blocked(&t.pairs, a.pair, now) || t.blocked(&t.users, a.user, now) ||
@@ -337,5 +358,5 @@ func (t *ldapLoginThrottle) slot(tbl *throttleTable, key ldapThrottleKey, now ti
 			break
 		}
 	}
-	return ldapThrottleOverflowKeys[int(key[0])%ldapThrottleOverflowShards], true
+	return ldapThrottleOverflowKeys[ldapThrottleShard(key)], true
 }
