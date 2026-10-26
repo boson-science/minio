@@ -19,6 +19,9 @@ package openid
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +42,13 @@ type publicKeys struct {
 
 	// map of kid to public key
 	pkMap map[string]any
+}
+
+func newPublicKeys() *publicKeys {
+	return &publicKeys{
+		RWMutex: &sync.RWMutex{},
+		pkMap:   map[string]any{},
+	}
 }
 
 func (pk *publicKeys) parseAndAdd(b io.Reader) error {
@@ -67,20 +77,28 @@ func (pk *publicKeys) add(keyID string, key any) {
 }
 
 func (pk *publicKeys) get(kid string) any {
+	if pk == nil {
+		return nil
+	}
 	pk.RLock()
 	defer pk.RUnlock()
 	return pk.pkMap[kid]
 }
 
-// PopulatePublicKey - populates a new publickey from the JWKS URL.
+// PopulatePublicKey - populates the provider's public keys from its JWKS URL.
+// Keys are kept per provider so that a key published by one provider can
+// never verify a token presented for another provider.
 func (r *Config) PopulatePublicKey(arn arn.ARN) error {
-	pCfg := r.arnProviderCfgsMap[arn]
+	pCfg, ok := r.arnProviderCfgsMap[arn]
+	if !ok {
+		return fmt.Errorf("Role %s does not exist", arn)
+	}
 	if pCfg.JWKS.URL == nil || pCfg.JWKS.URL.String() == "" {
 		return nil
 	}
-
-	// Add client secret for the client ID for HMAC based signature.
-	r.pubKeys.add(pCfg.ClientID, []byte(pCfg.ClientSecret))
+	if pCfg.pubKeys == nil {
+		return errors.New("OpenID provider public keys are not initialized")
+	}
 
 	client := &http.Client{
 		Transport: r.transport,
@@ -95,7 +113,7 @@ func (r *Config) PopulatePublicKey(arn arn.ARN) error {
 		return errors.New(resp.Status)
 	}
 
-	return r.pubKeys.parseAndAdd(resp.Body)
+	return pCfg.pubKeys.parseAndAdd(resp.Body)
 }
 
 // ErrTokenExpired - error token expired
@@ -104,18 +122,19 @@ var (
 )
 
 func updateClaimsExpiry(dsecs string, claims map[string]any) error {
-	expStr := claims["exp"]
-	if expStr == "" {
+	// A token without a usable expiry must never be accepted, otherwise
+	// the generated credentials would never expire.
+	exp, err := auth.ExpToInt64(claims["exp"])
+	if err != nil {
+		return err
+	}
+	if exp <= 0 {
 		return ErrTokenExpired
 	}
 
 	// No custom duration requested, the claims can be used as is.
 	if dsecs == "" {
 		return nil
-	}
-
-	if _, err := auth.ExpToInt64(expStr); err != nil {
-		return err
 	}
 
 	defaultExpiryDuration, err := GetDefaultExpiration(dsecs)
@@ -130,60 +149,94 @@ func updateClaimsExpiry(dsecs string, claims map[string]any) error {
 const (
 	audClaim = "aud"
 	azpClaim = "azp"
+	issClaim = "iss"
 )
+
+// validSigningMethods - signing methods accepted for id_tokens. Symmetric
+// (HS*) methods are deliberately not accepted, verification keys come only
+// from the provider's JWKS.
+var validSigningMethods = []string{
+	"RS256", "RS384", "RS512",
+	"ES256", "ES384", "ES512",
+	"RS3256", "RS3384", "RS3512",
+	"ES3256", "ES3384", "ES3512",
+}
+
+var errUnknownKid = errors.New("No public key found for kid")
+
+// signingMethodMatchesKey - returns true only if the key type is the one
+// expected by the token's signing method, preventing algorithm confusion.
+func signingMethodMatchesKey(method jwtgo.SigningMethod, key any) bool {
+	switch method.(type) {
+	case *jwtgo.SigningMethodRSA, *jwtgo.SigningMethodRSAPSS:
+		_, ok := key.(*rsa.PublicKey)
+		return ok
+	case *jwtgo.SigningMethodECDSA:
+		_, ok := key.(*ecdsa.PublicKey)
+		return ok
+	case *jwtgo.SigningMethodEd25519:
+		_, ok := key.(ed25519.PublicKey)
+		return ok
+	}
+	return false
+}
 
 // Validate - validates the id_token.
 func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, dsecs string, claims map[string]any) error {
-	jp := new(jwtgo.Parser)
-	jp.ValidMethods = []string{
-		"RS256", "RS384", "RS512",
-		"ES256", "ES384", "ES512",
-		"HS256", "HS384", "HS512",
-		"RS3256", "RS3384", "RS3512",
-		"ES3256", "ES3384", "ES3512",
+	pCfg, ok := r.arnProviderCfgsMap[arn]
+	if !ok {
+		return fmt.Errorf("Role %s does not exist", arn)
 	}
+
+	jp := new(jwtgo.Parser)
+	jp.ValidMethods = validSigningMethods
 
 	keyFuncCallback := func(jwtToken *jwtgo.Token) (any, error) {
 		kid, ok := jwtToken.Header["kid"].(string)
 		if !ok {
 			return nil, fmt.Errorf("Invalid kid value %v", jwtToken.Header["kid"])
 		}
-		pubkey := r.pubKeys.get(kid)
+		pubkey := pCfg.pubKeys.get(kid)
 		if pubkey == nil {
-			return nil, fmt.Errorf("No public key found for kid %s", kid)
+			return nil, fmt.Errorf("%w %s", errUnknownKid, kid)
+		}
+		if !signingMethodMatchesKey(jwtToken.Method, pubkey) {
+			return nil, fmt.Errorf("signing method %s is not valid for the key with kid %s", jwtToken.Method.Alg(), kid)
 		}
 		return pubkey, nil
 	}
 
-	pCfg, ok := r.arnProviderCfgsMap[arn]
-	if !ok {
-		return fmt.Errorf("Role %s does not exist", arn)
-	}
-
 	mclaims := jwtgo.MapClaims(claims)
 	jwtToken, err := jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
-	if err != nil {
-		// Re-populate the public key in-case the JWKS
-		// pubkeys are refreshed
+	if err != nil && errors.Is(err, errUnknownKid) {
+		// Re-populate the public keys in-case the JWKS
+		// pubkeys were rotated, then retry with the same parser.
 		if err = r.PopulatePublicKey(arn); err != nil {
 			return err
 		}
-		jwtToken, err = jwtgo.ParseWithClaims(token, &mclaims, keyFuncCallback)
-		if err != nil {
-			return err
-		}
+		jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
+	}
+	if err != nil {
+		return err
 	}
 
 	if !jwtToken.Valid {
 		return ErrTokenExpired
 	}
 
-	if err = updateClaimsExpiry(dsecs, mclaims); err != nil {
-		return err
+	// REQUIRED. The `exp` claim is optional for the JWT library, but an
+	// id_token must carry one, it bounds the lifetime of the credentials.
+	if !mclaims.VerifyExpiresAt(time.Now().Unix(), true) {
+		return ErrTokenExpired
 	}
 
-	if err = r.updateUserinfoClaims(ctx, arn, accessToken, mclaims); err != nil {
-		return err
+	// REQUIRED. The `iss` claim MUST exactly match the issuer of the
+	// provider configured for the requested role.
+	if pCfg.DiscoveryDoc.Issuer == "" {
+		return errors.New("OpenID provider discovery document has no issuer, unable to validate `iss` claim")
+	}
+	if iss, _ := mclaims[issClaim].(string); iss != pCfg.DiscoveryDoc.Issuer {
+		return errors.New("STS JWT Token has `iss` claim invalid, `iss` must match the configured OpenID provider issuer")
 	}
 
 	// Validate that matching clientID appears in the aud or azp claims.
@@ -218,7 +271,13 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		}
 	}
 
-	return nil
+	if err = updateClaimsExpiry(dsecs, mclaims); err != nil {
+		return err
+	}
+
+	// Claims from the UserInfo endpoint are merged only after the token
+	// has been bound to this provider, they never replace token claims.
+	return r.updateUserinfoClaims(ctx, arn, accessToken, mclaims)
 }
 
 func (r *Config) updateUserinfoClaims(ctx context.Context, arn arn.ARN, accessToken string, claims map[string]any) error {

@@ -28,7 +28,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/minio/madmin-go/v3"
@@ -167,7 +166,6 @@ type Config struct {
 	// map of config names to providerCfg's
 	ProviderCfgs map[string]*providerCfg
 
-	pubKeys          publicKeys
 	roleArnPolicyMap map[arn.ARN]string
 
 	transport   http.RoundTripper
@@ -183,7 +181,6 @@ func (r *Config) Clone() Config {
 		Enabled:            r.Enabled,
 		arnProviderCfgsMap: make(map[arn.ARN]*providerCfg, len(r.arnProviderCfgsMap)),
 		ProviderCfgs:       make(map[string]*providerCfg, len(r.ProviderCfgs)),
-		pubKeys:            r.pubKeys,
 		roleArnPolicyMap:   make(map[arn.ARN]string, len(r.roleArnPolicyMap)),
 		transport:          r.transport,
 		closeRespFn:        r.closeRespFn,
@@ -204,13 +201,9 @@ func LookupConfig(s config.Config, transport http.RoundTripper, closeRespFn func
 		Enabled:            false,
 		arnProviderCfgsMap: map[arn.ARN]*providerCfg{},
 		ProviderCfgs:       map[string]*providerCfg{},
-		pubKeys: publicKeys{
-			RWMutex: &sync.RWMutex{},
-			pkMap:   map[string]any{},
-		},
-		roleArnPolicyMap: map[arn.ARN]string{},
-		transport:        openIDClientTransport,
-		closeRespFn:      closeRespFn,
+		roleArnPolicyMap:   map[arn.ARN]string{},
+		transport:          openIDClientTransport,
+		closeRespFn:        closeRespFn,
 	}
 
 	seenClientIDs := set.NewStringSet()

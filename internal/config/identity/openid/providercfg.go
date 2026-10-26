@@ -53,6 +53,9 @@ type providerCfg struct {
 
 	roleArn  arn.ARN
 	provider provider.Provider
+
+	// public keys fetched from this provider's JWKS URL, keyed by kid.
+	pubKeys *publicKeys
 }
 
 func newProviderCfgFromConfig(getCfgVal func(cfgName string) string) providerCfg {
@@ -68,6 +71,7 @@ func newProviderCfgFromConfig(getCfgVal func(cfgName string) string) providerCfg
 		RolePolicy:         getCfgVal(RolePolicy),
 		UserReadableClaim:  getCfgVal(UserReadableClaim),
 		UserIDClaim:        getCfgVal(UserIDClaim),
+		pubKeys:            newPublicKeys(),
 	}
 }
 

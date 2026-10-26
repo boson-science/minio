@@ -20,8 +20,15 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"slices"
@@ -29,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	jwtgo "github.com/golang-jwt/jwt/v4"
 	"github.com/klauspost/compress/zip"
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
@@ -3594,4 +3602,119 @@ func (s *TestSuiteIAM) TestOpenIDServiceAccWithRolePolicyUnderAMP(c *check) {
 
 	// 5. Check that service account can be deleted.
 	c.assertSvcAccDeletion(ctx, s, userAdmClient, value.AccessKeyID, bucket)
+}
+
+// newMockOpenIDServer - starts a minimal OpenID provider serving a discovery
+// document and a JWKS with a single RSA key.
+func newMockOpenIDServer(c *check, kid string) (*httptest.Server, *rsa.PrivateKey) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		c.Fatalf("unable to generate RSA key: %v", err)
+	}
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"issuer":   srv.URL,
+			"jwks_uri": srv.URL + "/jwks",
+		})
+	})
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]string{{
+				"kty": "RSA",
+				"alg": "RS256",
+				"use": "sig",
+				"kid": kid,
+				"n":   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			}},
+		})
+	})
+	return srv, key
+}
+
+// TestOpenIDSTSRejectsForgedTokens - AssumeRoleWithWebIdentity must not issue
+// credentials for tokens forged with the client secret (GHSA-5cx5-wh4m-82fh),
+// nor for tokens without an expiry.
+func (s *TestSuiteIAM) TestOpenIDSTSRejectsForgedTokens(c *check, idp *httptest.Server, key *rsa.PrivateKey, kid, clientID, clientSecret string) {
+	sign := func(method jwtgo.SigningMethod, kid string, claims jwtgo.MapClaims, k any) string {
+		tok := jwtgo.NewWithClaims(method, claims)
+		tok.Header["kid"] = kid
+		signed, err := tok.SignedString(k)
+		if err != nil {
+			c.Fatalf("unable to sign token: %v", err)
+		}
+		return signed
+	}
+	claims := func(policyName string) jwtgo.MapClaims {
+		return jwtgo.MapClaims{
+			"iss":    idp.URL,
+			"aud":    clientID,
+			"sub":    "attacker",
+			"exp":    time.Now().Add(time.Hour).Unix(),
+			"policy": policyName,
+		}
+	}
+	retrieve := func(token string) (cr.Value, error) {
+		webID := cr.STSWebIdentity{
+			Client:      s.TestSuiteCommon.client,
+			STSEndpoint: s.endPoint,
+			GetWebIDTokenExpiry: func() (*cr.WebIdentityToken, error) {
+				return &cr.WebIdentityToken{Token: token}, nil
+			},
+		}
+		return webID.Retrieve()
+	}
+
+	// Positive control: a correctly signed token is accepted.
+	if _, err := retrieve(sign(jwtgo.SigningMethodRS256, kid, claims("readwrite"), key)); err != nil {
+		c.Fatalf("Expected valid RS256 token to generate STS creds, got err: %v", err)
+	}
+
+	noExp := claims("consoleAdmin")
+	delete(noExp, "exp")
+
+	for name, token := range map[string]string{
+		"HS256 signed with client secret": sign(jwtgo.SigningMethodHS256, clientID, claims("consoleAdmin"), []byte(clientSecret)),
+		"HS256 signed with RSA kid":       sign(jwtgo.SigningMethodHS256, kid, claims("consoleAdmin"), []byte(clientSecret)),
+		"RS256 without exp":               sign(jwtgo.SigningMethodRS256, kid, noExp, key),
+	} {
+		if v, err := retrieve(token); err == nil {
+			c.Fatalf("%s: expected STS to reject the token, got credentials %s", name, v.AccessKeyID)
+		}
+	}
+}
+
+func TestIAMWithMockOpenIDRejectsForgedTokens(t *testing.T) {
+	const (
+		kid          = "mock-kid"
+		clientID     = "minio-forgery-test-client"
+		clientSecret = "minio-forgery-test-secret"
+	)
+	// A single backend is sufficient, the validation is backend independent.
+	suite := iamTestSuites[0]
+	c := &check{t, suite.serverType}
+
+	idp, key := newMockOpenIDServer(c, kid)
+	defer idp.Close()
+
+	suite.SetUpSuite(c)
+	defer suite.TearDownSuite(c)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+	configCmds := []string{
+		"identity_openid",
+		fmt.Sprintf("config_url=%s/.well-known/openid-configuration", idp.URL),
+		"client_id=" + clientID,
+		"client_secret=" + clientSecret,
+		"claim_name=policy",
+	}
+	if _, err := suite.adm.SetConfigKV(ctx, strings.Join(configCmds, " ")); err != nil {
+		c.Fatalf("unable to setup OpenID for tests: %v", err)
+	}
+	suite.RestartIAMSuite(c)
+
+	suite.TestOpenIDSTSRejectsForgedTokens(c, idp, key, kid, clientID, clientSecret)
 }
