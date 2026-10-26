@@ -96,7 +96,8 @@ jobs:
           cosign sign --yes "$image@$digest"
           jq -n --arg tag "$GITHUB_REF_NAME" --arg image "$image" --arg digest "$digest" \
             --arg upstream "minio/minio@7aac2a2c" \
-            '{release_tag:$tag,image:$image,digest:$digest,upstream_base:$upstream,console_version:"v1.7.6",platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
+            --arg console "$(go list -m -f '{{with .Replace}}{{.Path}}@{{.Version}}{{else}}{{.Path}}@{{.Version}}{{end}}' github.com/minio/console)" \
+            '{release_tag:$tag,image:$image,digest:$digest,upstream_base:$upstream,console_version:$console,platforms:["linux/amd64"],workflow_identity:env.GITHUB_WORKFLOW_REF}' > release-manifest.json
       - name: Verify the release tag
         run: git rev-parse --verify --quiet "refs/tags/${GITHUB_REF_NAME}^{commit}"
       - name: Publish the GitHub release
