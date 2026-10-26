@@ -1,63 +1,47 @@
-> [!NOTE]
-> **This is an independent, community-maintained fork of MinIO.** It is not
-> affiliated with or endorsed by MinIO, Inc. Upstream
-> [minio/minio](https://github.com/minio/minio) is no longer maintained; this
-> fork continues security and maintenance releases from its final source.
+> [!IMPORTANT]
+> **This is an independent, community-maintained fork of MinIO focused on security patches.**
+> Upstream [minio/minio](https://github.com/minio/minio) is no longer maintained. This fork
+> continues from its final source and ships fixes for security vulnerabilities and critical bugs.
+> It is not affiliated with or endorsed by MinIO, Inc.
 >
+> - Security fixes are tracked in [Security Advisories](https://github.com/boson-science/minio/security/advisories). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 > - Releases follow upstream's `RELEASE.<time>` scheme. See [RELEASING.md](RELEASING.md).
 > - The embedded web console comes from [boson-science/console](https://github.com/boson-science/console).
-> - Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
----
+# MinIO (community fork)
 
-# MinIO Quickstart Guide
+[![fork of minio/minio](https://img.shields.io/badge/fork%20of-minio%2Fminio-orange)](https://github.com/minio/minio) [![focus: security patches](https://img.shields.io/badge/focus-security%20patches-critical)](https://github.com/boson-science/minio/security/advisories) [![container: ghcr.io/boson-science/minio](https://img.shields.io/badge/container-ghcr.io%2Fboson--science%2Fminio-2496ED?logo=docker&logoColor=white)](https://github.com/boson-science/minio/pkgs/container/minio) [![license AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)](LICENSE)
 
-[![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/) [![license](https://img.shields.io/badge/license-AGPL%20V3-blue)](https://github.com/minio/minio/blob/master/LICENSE)
+[![MinIO](https://raw.githubusercontent.com/minio/minio/master/.github/logo.svg?sanitize=true)](https://github.com/minio/minio)
 
-[![MinIO](https://raw.githubusercontent.com/minio/minio/master/.github/logo.svg?sanitize=true)](https://min.io)
+MinIO is a high-performance, S3-compatible object storage server released under the GNU AGPL v3.0 license.
 
-MinIO is a high-performance, S3-compatible object storage solution released under the GNU AGPL v3.0 license.
-Designed for speed and scalability, it powers AI/ML, analytics, and data-intensive workloads with industry-leading performance.
+- S3 API compatible – works with existing S3 tools and SDKs
+- Built for analytics and AI/ML data pipelines
+- High performance for demanding storage workloads
 
-- S3 API Compatible – Seamless integration with existing S3 tools
-- Built for AI & Analytics – Optimized for large-scale data pipelines
-- High Performance – Ideal for demanding storage workloads.
+## Why this fork exists
 
-This README provides instructions for building MinIO from source and deploying onto baremetal hardware.
-Use the [MinIO Documentation](https://github.com/minio/docs) project to build and host a local copy of the documentation.
+MinIO, Inc. stopped maintaining the community edition, leaving deployed servers without security updates.
+This fork exists to keep those deployments patched. Its scope is deliberately narrow:
 
-## MinIO is Open Source Software
+- **Security fixes** for vulnerabilities in the server and the embedded console
+- **Critical bug fixes** and dependency updates needed to keep builds secure
+- **No new features** beyond what is needed to keep the community edition usable, such as restoring SSO in the console
 
-We designed MinIO as Open Source software for the Open Source software community. We encourage the community to remix, redesign, and reshare MinIO under the terms of the AGPLv3 license.
+All changes are released under the AGPLv3, like the original source. The AGPLv3 provides no warranty;
+support is best-effort through [GitHub issues](https://github.com/boson-science/minio/issues).
 
-All usage of MinIO in your application stack requires validation against AGPLv3 obligations, which include but are not limited to the release of modified code to the community from which you have benefited. Any commercial/proprietary usage of the AGPLv3 software, including repackaging or reselling services/features, is done at your own risk.
+## Getting MinIO
 
-The AGPLv3 provides no obligation by any party to support, maintain, or warranty the original or any modified work.
-All support is provided on a best-effort basis through Github and our [Slack](https://slack.min.io) channel, and any member of the community is welcome to contribute and assist others in their usage of the software.
+You have two options:
 
-MinIO [AIStor](https://www.min.io/product/aistor) includes enterprise-grade support and licensing for workloads which require commercial or proprietary usage and production-level SLA/SLO-backed support. For more information, [reach out for a quote](https://min.io/pricing).
+1. **Container image** published by this fork to the GitHub Container Registry and signed with cosign:
+   `ghcr.io/boson-science/minio:<RELEASE tag>`. See [Releases](https://github.com/boson-science/minio/releases).
+2. **Build from source** as described below.
 
-## Source-Only Distribution
-
-**Important:** The MinIO community edition is now distributed as source code only. We will no longer provide pre-compiled binary releases for the community version.
-
-### Installing Latest MinIO Community Edition
-
-To use MinIO community edition, you have two options:
-
-1. **Install from source** using `go install github.com/minio/minio@latest` (recommended)
-2. **Build a Docker image** from the provided Dockerfile
-
-See the sections below for detailed instructions on each method.
-
-### Legacy Binary Releases
-
-Historical pre-compiled binary releases remain available for reference but are no longer maintained:
-
-- GitHub Releases: https://github.com/minio/minio/releases
-- Direct downloads: https://dl.min.io/server/minio/release/
-
-**These legacy binaries will not receive updates.** We strongly recommend using source builds for access to the latest features, bug fixes, and security updates.
+Upstream's legacy binaries (`dl.min.io`, `minio/minio` images on Docker Hub and Quay) no longer receive
+updates and do not include this fork's security fixes.
 
 ## Install from Source
 
@@ -65,8 +49,12 @@ Use the following commands to compile and run a standalone MinIO server from sou
 If you do not have a working Golang environment, please follow [How to install Golang](https://golang.org/doc/install). Minimum version required is [go1.24](https://golang.org/dl/#stable)
 
 ```sh
-go install github.com/minio/minio@latest
+git clone https://github.com/boson-science/minio.git
+cd minio
+go build -o minio .
 ```
+
+`go install github.com/minio/minio@latest` installs the unmaintained upstream source, not this fork.
 
 You can alternatively run `go build` and use the `GOOS` and `GOARCH` environment variables to control the OS and architecture target.
 For example:
@@ -75,7 +63,7 @@ For example:
 env GOOS=linux GOARCH=arm64 go build
 ```
 
-Start MinIO by running `minio server PATH` where `PATH` is any empty folder on your local filesystem.
+Start MinIO by running `./minio server PATH` where `PATH` is any empty folder on your local filesystem.
 
 The MinIO deployment starts using default root credentials `minioadmin:minioadmin`.
 You can test the deployment using the MinIO Console, an embedded web-based object browser built into MinIO Server.
@@ -90,7 +78,7 @@ mc admin info local
 ```
 
 See [Test using MinIO Client `mc`](#test-using-minio-client-mc) for more information on using the `mc` commandline tool.
-For application developers, see <https://docs.min.io/enterprise/aistor-object-store/developers/sdk/> to view MinIO SDKs for supported languages.
+For application developers, any S3 SDK works; the open-source [minio-go](https://github.com/minio/minio-go) and [minio-py](https://github.com/minio/minio-py) SDKs are also available.
 
 > [!NOTE]
 > Production environments using compiled-from-source MinIO binaries do so at their own risk.
@@ -124,7 +112,7 @@ See the [MinIO Container](https://docs.min.io/community/minio-object-store/opera
 There are two paths for installing MinIO onto Kubernetes infrastructure:
 
 - Use the [MinIO Operator](https://github.com/minio/operator)
-- Use the community-maintained [Helm charts](https://github.com/minio/minio/tree/master/helm/minio)
+- Use the community-maintained [Helm charts](helm/minio)
 
 See the [MinIO Documentation](https://docs.min.io/community/minio-object-store/operations/deployments/kubernetes.html) for guidance on deploying using the Operator.
 The Community Helm chart has instructions in the folder-level README.
@@ -160,14 +148,14 @@ Follow the MinIO Client [Quickstart Guide](https://docs.min.io/community/minio-o
 - [The MinIO documentation website](https://docs.min.io/community/minio-object-store/index.html)
 - [MinIO Erasure Code Overview](https://docs.min.io/community/minio-object-store/operations/concepts/erasure-coding.html)
 - [Use `mc` with MinIO Server](https://docs.min.io/community/minio-object-store/reference/minio-mc.html)
-- [Use `minio-go` SDK with MinIO Server](https://docs.min.io/enterprise/aistor-object-store/developers/sdk/go/)
+- [Use `minio-go` SDK with MinIO Server](https://github.com/minio/minio-go)
 
 ## Contribute to MinIO Project
 
-Please follow MinIO [Contributor's Guide](https://github.com/minio/minio/blob/master/CONTRIBUTING.md) for guidance on making new contributions to the repository.
+Please follow the [Contributor's Guide](CONTRIBUTING.md). Report security issues privately through [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 
-- MinIO source is licensed under the [GNU AGPLv3](https://github.com/minio/minio/blob/master/LICENSE).
-- MinIO [documentation](https://github.com/minio/minio/tree/master/docs) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-- [License Compliance](https://github.com/minio/minio/blob/master/COMPLIANCE.md)
+- MinIO source is licensed under the [GNU AGPLv3](LICENSE).
+- MinIO [documentation](docs) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- [License Compliance](COMPLIANCE.md)
