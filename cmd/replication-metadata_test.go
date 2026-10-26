@@ -640,9 +640,7 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		"minio.metadata." + xhttp.MinIOSourceReplicationRequest: "true",
 		"minio.metadata." + xhttp.MinIOSourceETag:               srcETag,
 	}), snowball)
-	if resp.StatusCode == http.StatusOK {
-		c.Fatalf("PutObjectExtract PAX replication claim: unexpected success")
-	}
+	expectStatus("PutObjectExtract PAX replication claim", resp, body, http.StatusForbidden)
 	for _, object := range []string{"claim-put", "claim-mp", "claim-copy", "claim-extract", "claim-pax"} {
 		if _, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, object, ObjectOptions{}); err == nil {
 			c.Fatalf("%s: object created by rejected replication claim", object)
@@ -854,6 +852,19 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 	}
 	for _, d := range deleters {
 		object := "delete-" + d.name
+		// The delete marker readiness check is honoured only with s3:ReplicateDelete.
+		hreq, err := newTestSignedRequestV4(http.MethodHead, objURL(bucket, object, nil), 0, nil, d.cred.AccessKey, d.cred.SecretKey,
+			map[string]string{xhttp.MinIOCheckDMReplicationReady: "true"})
+		if err != nil {
+			c.Fatal(err)
+		}
+		hopts, err := getOpts(ctx, hreq, bucket, object)
+		if err != nil {
+			c.Fatal(err)
+		}
+		if hopts.CheckDMReplicationReady != d.suppressed {
+			c.Fatalf("%s: delete marker readiness check=%v, want %v", d.name, hopts.CheckDMReplicationReady, d.suppressed)
+		}
 		resp, body = do(user, http.MethodPut, objURL(bucket, object, nil), data, nil)
 		expectStatus("PutObject "+object, resp, body, http.StatusOK)
 		delBody := []byte("<Delete><Object><Key>" + object + "</Key></Object></Delete>")
@@ -878,6 +889,119 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		}
 		if notified == d.suppressed {
 			c.Fatalf("DeleteObjects %s: notified=%v, want suppressed=%v", d.name, notified, d.suppressed)
+		}
+	}
+
+	// 8. PutObjectExtract checks replication claims per extracted object:
+	//    s3:ReplicateObject is allowed on prefix/* but denied on
+	//    prefix/secret/*. Entries outside the permission are rejected (the
+	//    upload fails with AccessDenied) and never stored with suppressed
+	//    notifications; covered entries behave like replicated objects.
+	{
+		carveOut := replTestUserStatements(ctx, c, s, "replhdr-extract-carveout",
+			replTestStatement([]string{bucket}, "s3:PutObject", "s3:GetObject"),
+			replTestStatement([]string{bucket + "/prefix"}, "s3:ReplicateObject"),
+			map[string]any{
+				"Effect":   "Deny",
+				"Action":   []string{"s3:ReplicateObject"},
+				"Resource": []string{"arn:aws:s3:::" + bucket + "/prefix/secret/*"},
+			})
+		putCh := make(chan event.Event, 100)
+		var putMask pubsub.Mask
+		putMask.MergeMaskable(event.ObjectCreatedPut)
+		if err := globalHTTPListen.Subscribe(putMask, putCh, doneCh, func(ev event.Event) bool {
+			return ev.S3.Bucket.Name == bucket
+		}); err != nil {
+			c.Fatal(err)
+		}
+		tarOf := func(names ...string) []byte {
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			for _, name := range names {
+				if err := tw.WriteHeader(&tar.Header{
+					Name: name, Mode: 0o600, Size: int64(len(data)), ModTime: time.Now(), Typeflag: tar.TypeReg,
+				}); err != nil {
+					c.Fatal(err)
+				}
+				tw.Write(data)
+			}
+			tw.Close()
+			return buf.Bytes()
+		}
+		extractHdrs := merge(sourceRepl, map[string]string{
+			xhttp.AmzSnowballExtract:  "true",
+			xhttp.MinIOSnowballPrefix: "prefix",
+		})
+		// covered entries only: accepted, notifications suppressed
+		resp, body = do(carveOut, http.MethodPut, objURL(bucket, "covered.tar", nil), tarOf("covered"), extractHdrs)
+		expectStatus("PutObjectExtract covered entries", resp, body, http.StatusOK)
+		if _, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "prefix/covered", ObjectOptions{}); err != nil {
+			c.Fatalf("prefix/covered: %v", err)
+		}
+		// an uncovered entry rejects the upload
+		resp, body = do(carveOut, http.MethodPut, objURL(bucket, "secret.tar", nil), tarOf("secret/x"), extractHdrs)
+		expectStatus("PutObjectExtract uncovered entry", resp, body, http.StatusForbidden)
+		if _, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "prefix/secret/x", ObjectOptions{}); err == nil {
+			c.Fatal("prefix/secret/x: stored despite missing s3:ReplicateObject")
+		}
+		// without the replication claim both entries are stored and notified
+		resp, body = do(carveOut, http.MethodPut, objURL(bucket, "plain.tar", nil), tarOf("plain", "secret/plain"), map[string]string{
+			xhttp.AmzSnowballExtract:  "true",
+			xhttp.MinIOSnowballPrefix: "prefix",
+		})
+		expectStatus("PutObjectExtract without claim", resp, body, http.StatusOK)
+		notified := map[string]bool{}
+		timeout := time.After(2 * time.Second)
+	collect:
+		for len(notified) < 2 {
+			select {
+			case ev := <-putCh:
+				notified[ev.S3.Object.Key] = true
+			case <-timeout:
+				break collect
+			}
+		}
+		for _, key := range []string{"prefix/covered", "prefix/secret/x"} {
+			if notified[key] || notified[url.QueryEscape(key)] {
+				c.Fatalf("%s: unexpected notification", key)
+			}
+		}
+		for _, key := range []string{"prefix/plain", "prefix/secret/plain"} {
+			if !notified[key] && !notified[url.QueryEscape(key)] {
+				c.Fatalf("%s: missing notification, got %v", key, notified)
+			}
+		}
+	}
+
+	// 9. Batch replication sends replication requests without a REPLICA
+	//    status; targets need s3:ReplicateObject to accept them.
+	{
+		putOpts, _, err := batchReplicationOpts(ctx, "", ObjectInfo{
+			Bucket:  bucket,
+			Name:    "batch",
+			ModTime: srcMTime,
+			ETag:    srcETag,
+		})
+		if err != nil {
+			c.Fatal(err)
+		}
+		if putOpts.Internal.ReplicationStatus != "" || !putOpts.Internal.ReplicationRequest {
+			c.Fatalf("unexpected batch replication options: %+v", putOpts.Internal)
+		}
+		_, err = s.getUserClient(c, user.AccessKey, user.SecretKey, "").PutObject(ctx, bucket, "batch", bytes.NewReader(data), int64(len(data)), putOpts)
+		if minio.ToErrorResponse(err).Code != "AccessDenied" {
+			c.Fatalf("batch replication without s3:ReplicateObject: want AccessDenied, got %v", err)
+		}
+		_, err = s.getUserClient(c, replicator.AccessKey, replicator.SecretKey, "").PutObject(ctx, bucket, "batch", bytes.NewReader(data), int64(len(data)), putOpts)
+		if err != nil {
+			c.Fatalf("batch replication with s3:ReplicateObject: %v", err)
+		}
+		oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "batch", ObjectOptions{})
+		if err != nil {
+			c.Fatal(err)
+		}
+		if oi.ETag != srcETag || !oi.ModTime.Equal(srcMTime) {
+			c.Fatalf("batch replication: source ETag/mtime not preserved: %q %v", oi.ETag, oi.ModTime)
 		}
 	}
 }

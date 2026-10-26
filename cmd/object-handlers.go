@@ -2376,7 +2376,6 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	getObjectInfo := objectAPI.GetObjectInfo
 
 	// These are static for all objects extracted.
-	reqParams := extractObjectReqParams(ctx, r, bucket, opts.prefixAll, policy.ReplicateObjectAction)
 	respElements := map[string]string{
 		"requestId": w.Header().Get(xhttp.AmzRequestID),
 		"nodeId":    w.Header().Get(xhttp.AmzRequestHostID),
@@ -2390,6 +2389,11 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.PutObjectAction); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return errors.New(errorCodes.ToAPIErr(s3Err).Code)
+		}
+		// The prefix-level check above only rejects early, replication
+		// permissions may differ per object.
+		if checkReplicationRequestClaim(ctx, r, bucket, object) != ErrNone {
+			return PrefixAccessDenied{Bucket: bucket, Object: object}
 		}
 		metadata := map[string]string{
 			xhttp.AmzStorageClass: sc, // save same storage-class as incoming stream.
@@ -2458,7 +2462,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			// replication-only PAX records are honoured only from replicators
 			if hasReplicationOnlyHeaders(hdrs) && !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
 				if _, ok := hdrs[xhttp.MinIOSourceReplicationRequest]; ok {
-					return errors.New(errorCodes.ToAPIErr(ErrAccessDenied).Code)
+					return PrefixAccessDenied{Bucket: bucket, Object: object}
 				}
 				hdrs = withoutReplicationOnlyHeaders(hdrs)
 			}
@@ -2560,7 +2564,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			EventName:    event.ObjectCreatedPut,
 			BucketName:   bucket,
 			Object:       objInfo,
-			ReqParams:    reqParams,
+			ReqParams:    extractObjectReqParams(ctx, r, bucket, object, policy.ReplicateObjectAction),
 			RespElements: respElements,
 			UserAgent:    r.UserAgent(),
 			Host:         handlers.GetSourceIP(r),

@@ -127,7 +127,9 @@ func getOpts(ctx context.Context, r *http.Request, bucket, object string) (Objec
 	}
 	opts.DeleteMarker = delMarker
 
-	replReadyCheck, err := parseBoolHeader(bucket, object, hdr, xhttp.MinIOCheckDMReplicationReady)
+	// only sent ahead of delete marker replication
+	dmHdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateDeleteAction)
+	replReadyCheck, err := parseBoolHeader(bucket, object, dmHdr, xhttp.MinIOCheckDMReplicationReady)
 	if err != nil {
 		return opts, err
 	}
