@@ -324,14 +324,6 @@ func (d *naughtyDisk) StatInfoFile(ctx context.Context, volume, path string, glo
 	return d.disk.StatInfoFile(ctx, volume, path, glob)
 }
 
-func (d *naughtyDisk) ReadMultiple(ctx context.Context, req ReadMultipleReq, resp chan<- ReadMultipleResp) error {
-	if err := d.calcError(); err != nil {
-		close(resp)
-		return err
-	}
-	return d.disk.ReadMultiple(ctx, req, resp)
-}
-
 func (d *naughtyDisk) CleanAbandonedData(ctx context.Context, volume string, path string) error {
 	if err := d.calcError(); err != nil {
 		return err

@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"os/user"
 	"path"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1283,48 +1282,6 @@ func (s *storageRESTServer) DeleteBulkHandler(w http.ResponseWriter, r *http.Req
 	keepHTTPResponseAlive(w)(s.getStorage().DeleteBulk(r.Context(), volume, req.Paths...))
 }
 
-// ReadMultiple returns multiple files
-func (s *storageRESTServer) ReadMultiple(w http.ResponseWriter, r *http.Request) {
-	if !s.IsValid(w, r) {
-		return
-	}
-	rw := streamHTTPResponse(w)
-	defer func() {
-		if r := recover(); r != nil {
-			debug.PrintStack()
-			rw.CloseWithError(fmt.Errorf("panic: %v", r))
-		}
-	}()
-
-	var req ReadMultipleReq
-	mr := msgpNewReader(r.Body)
-	defer readMsgpReaderPoolPut(mr)
-	err := req.DecodeMsg(mr)
-	if err != nil {
-		rw.CloseWithError(err)
-		return
-	}
-
-	mw := msgp.NewWriter(rw)
-	responses := make(chan ReadMultipleResp, len(req.Files))
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for resp := range responses {
-			err := resp.EncodeMsg(mw)
-			if err != nil {
-				rw.CloseWithError(err)
-				return
-			}
-			mw.Flush()
-		}
-	}()
-	err = s.getStorage().ReadMultiple(r.Context(), req, responses)
-	wg.Wait()
-	rw.CloseWithError(err)
-}
-
 // globalLocalSetDrives is used for local drive as well as remote REST
 // API caller for other nodes to talk to this node.
 //
@@ -1363,7 +1320,6 @@ func registerStorageRESTHandlers(router *mux.Router, endpointServerPools Endpoin
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteVersions).HandlerFunc(h(server.DeleteVersionsHandler))
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodVerifyFile).HandlerFunc(h(server.VerifyFileHandler))
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodStatInfoFile).HandlerFunc(h(server.StatInfoFile))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadMultiple).HandlerFunc(h(server.ReadMultiple))
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCleanAbandoned).HandlerFunc(h(server.CleanAbandonedDataHandler))
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteBulk).HandlerFunc(h(server.DeleteBulkHandler))
 			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadParts).HandlerFunc(h(server.ReadPartsHandler))

@@ -21,12 +21,16 @@ import (
 	"bytes"
 	"errors"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
+	"path"
 	"reflect"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/minio/minio/internal/grid"
+	"github.com/minio/mux"
 	xnet "github.com/minio/pkg/v3/net"
 )
 
@@ -410,4 +414,61 @@ func TestStorageRESTClientRenameFile(t *testing.T) {
 	restClient := newStorageRESTHTTPServerClient(t)
 
 	testStorageAPIRenameFile(t, restClient)
+}
+
+// TestStorageRESTNoReadMultipleRoute verifies that the removed ReadMultiple
+// ("/rmpl") storage REST endpoint is no longer registered (GHSA-xh8f-g2qw-gcm7).
+func TestStorageRESTNoReadMultipleRoute(t *testing.T) {
+	tg, err := grid.SetupTestGrid(1)
+	if err != nil {
+		t.Fatalf("SetupTestGrid: %v", err)
+	}
+	t.Cleanup(tg.Cleanup)
+
+	prevHost, prevPort := globalMinioHost, globalMinioPort
+	t.Cleanup(func() {
+		globalMinioHost, globalMinioPort = prevHost, prevPort
+	})
+
+	u, err := xnet.ParseHTTPURL(tg.Servers[0].URL)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	u.Path = t.TempDir()
+	globalMinioHost, globalMinioPort = mustSplitHostPort(u.Host)
+
+	endpoint, err := NewEndpoint(u.String())
+	if err != nil {
+		t.Fatalf("NewEndpoint failed %v", err)
+	}
+	if err = endpoint.UpdateIsLocal(); err != nil {
+		t.Fatalf("UpdateIsLocal failed %v", err)
+	}
+	if !endpoint.IsLocal {
+		t.Fatalf("expected endpoint %v to be local", endpoint)
+	}
+	endpoint.PoolIdx, endpoint.SetIdx, endpoint.DiskIdx = 0, 0, 0
+
+	poolEps := []PoolEndpoints{{Endpoints: Endpoints{endpoint}}}
+	poolEps[0].SetCount = 1
+	poolEps[0].DrivesPerSet = 1
+
+	router := tg.Mux[0]
+	registerStorageRESTHandlers(router, poolEps, tg.Managers[0])
+
+	base := path.Join(storageRESTPrefix, endpoint.Path) + storageRESTVersionPrefix
+	match := func(method string) bool {
+		req := httptest.NewRequest(http.MethodPost, base+method, nil)
+		var m mux.RouteMatch
+		return router.Match(req, &m) && m.MatchErr == nil && m.Handler != nil
+	}
+
+	// Sanity check: a still-registered POST endpoint must match, otherwise
+	// the negative assertion below would be meaningless.
+	if !match(storageRESTMethodStatInfoFile) {
+		t.Fatalf("expected %s to be routed", base+storageRESTMethodStatInfoFile)
+	}
+	if match("/rmpl") {
+		t.Fatalf("ReadMultiple route %s must not be registered", base+"/rmpl")
+	}
 }

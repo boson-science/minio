@@ -1941,3 +1941,66 @@ func TestXLStorageReadMetadata(t *testing.T) {
 		t.Fatalf("Unexpected error from readMetadata - expect %v: got %v", errFileNameTooLong, err)
 	}
 }
+
+// TestXLStorageGetVolDir verifies that getVolDir rejects volume names
+// containing path traversal components while accepting legitimate
+// bucket and internal .minio.sys volumes.
+func TestXLStorageGetVolDir(t *testing.T) {
+	drivePath := "/mnt/drive1"
+	s := &xlStorage{drivePath: drivePath}
+
+	testCases := []struct {
+		volume  string
+		wantErr error
+	}{
+		// Rejected forms.
+		{"", errVolumeNotFound},
+		{".", errVolumeNotFound},
+		{"..", errVolumeNotFound},
+		{"../", errVolumeNotFound},
+		{"/..", errVolumeNotFound},
+		{"../etc", errVolumeNotFound},
+		{"../../etc/passwd", errVolumeNotFound},
+		{"bucket/../..", errVolumeNotFound},
+		{"bucket/../../etc", errVolumeNotFound},
+		{".minio.sys/..", errVolumeNotFound},
+		{".minio.sys/../..", errVolumeNotFound},
+		{".minio.sys/../../etc", errVolumeNotFound},
+		{".minio.sys/tmp/../../..", errVolumeNotFound},
+		{"./bucket", errVolumeNotFound},
+		{"bucket/./x", errVolumeNotFound},
+		{`..\..\etc`, errVolumeNotFound},
+		{`bucket\..\..`, errVolumeNotFound},
+		{" .. /etc", errVolumeNotFound},
+
+		// Accepted forms.
+		{"bucket", nil},
+		{"my-bucket.example", nil},
+		{"..bucket", nil},
+		{"bucket..", nil},
+		{minioMetaBucket, nil},
+		{minioMetaTmpBucket, nil},
+		{minioMetaTmpDeletedBucket, nil},
+		{minioMetaMultipartBucket, nil},
+		{pathJoin(minioMetaBucket, bucketMetaPrefix), nil},
+		{pathJoin(minioMetaMultipartBucket, "abc", "def"), nil},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.volume, func(t *testing.T) {
+			got, err := s.getVolDir(tc.volume)
+			if err != tc.wantErr {
+				t.Fatalf("getVolDir(%q): want err %v, got %v (path %q)", tc.volume, tc.wantErr, err, got)
+			}
+			if err != nil {
+				return
+			}
+			if want := pathJoin(drivePath, tc.volume); got != want {
+				t.Fatalf("getVolDir(%q): want %q, got %q", tc.volume, want, got)
+			}
+			if !strings.HasPrefix(got, drivePath+SlashSeparator) {
+				t.Fatalf("getVolDir(%q) = %q escapes drive %q", tc.volume, got, drivePath)
+			}
+		})
+	}
+}
