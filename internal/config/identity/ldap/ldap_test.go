@@ -28,12 +28,23 @@ import (
 )
 
 func TestIsUserLookupMiss(t *testing.T) {
+	// Obtain the real "not found" error from minio/pkg: with no user search
+	// bases configured LookupUsername finds nothing without touching the
+	// connection. A wording change in minio/pkg makes this test fail.
+	var cfg xldap.Config
+	_, notFound := cfg.LookupUsername(nil, "alice")
+	if notFound == nil {
+		t.Fatal("expected LookupUsername to report a missing user")
+	}
+
 	testCases := []struct {
 		err  error
 		miss bool
 	}{
-		// Messages produced by xldap.Config.LookupUsername.
-		{fmt.Errorf("User DN not found for: %s", "alice"), true},
+		{notFound, true},
+		// minio/pkg does not expose a way to produce this error without an
+		// LDAP server returning two entries; message copied from
+		// xldap.Config.LookupUsername (minio/pkg v3.1.3).
 		{fmt.Errorf("Multiple DNs for %s found - please fix the search filter", "alice"), true},
 		// Infrastructure failures must not be reported as credential errors.
 		{errors.New("LDAP client: connection reset"), false},

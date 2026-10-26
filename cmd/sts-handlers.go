@@ -35,7 +35,6 @@ import (
 	"github.com/minio/minio/internal/auth"
 	cfgldap "github.com/minio/minio/internal/config/identity/ldap"
 	"github.com/minio/minio/internal/config/identity/openid"
-	"github.com/minio/minio/internal/handlers"
 	"github.com/minio/minio/internal/hash/sha256"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
@@ -707,13 +706,13 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 		return
 	}
 
-	// Throttle attempts per username and per source IP before contacting
-	// the LDAP server. Rejected, unknown-user and throttled attempts all get
-	// the same generic response, details are only logged.
-	userKey := ldapThrottleUserKey(ldapUsername)
-	ipKey := ldapThrottleIPKey(handlers.GetSourceIPRaw(r))
-	if !globalLDAPLoginThrottle.acquire(userKey, ipKey) {
-		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q throttled", ldapUsername))
+	// Throttle attempts before contacting the LDAP server. Rejected,
+	// unknown-user and throttled attempts all get the same generic
+	// response; details are only logged.
+	source := ldapThrottleSource(r)
+	attempt := globalLDAPLoginThrottle.acquire(ldapUsername, source)
+	if attempt == nil {
+		writeLDAPAccessDenied(ctx, w, fmt.Errorf("LDAP login for %q from %s throttled", ldapUsername, source))
 		return
 	}
 
@@ -723,6 +722,7 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 			writeLDAPAccessDenied(ctx, w, err)
 			return
 		}
+		attempt.notCredentialFailure()
 		stsLogIf(ctx, fmt.Errorf("LDAP server error: %w", err))
 		writeSTSErrorResponse(ctx, w, ErrSTSUpstreamError, nil)
 		return
@@ -733,6 +733,7 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 	// Check if this user or their groups have a policy applied.
 	ldapPolicies, err := globalIAMSys.PolicyDBGet(ldapUserDN, groupDistNames...)
 	if err != nil {
+		attempt.notCredentialFailure()
 		writeSTSErrorResponse(ctx, w, ErrSTSInternalError, err)
 		return
 	}
@@ -742,7 +743,7 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 				ldapActualUserDN, strings.Join(groupDistNames, "`,`")))
 		return
 	}
-	globalLDAPLoginThrottle.release(userKey, ipKey)
+	attempt.succeeded()
 
 	expiryDur, err := globalIAMSys.LDAPConfig.GetExpiryDuration(r.Form.Get(stsDurationSeconds))
 	if err != nil {

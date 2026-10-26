@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	cfgldap "github.com/minio/minio/internal/config/identity/ldap"
+	"github.com/minio/mux"
 	xldap "github.com/minio/pkg/v3/ldap"
 )
 
@@ -38,8 +40,10 @@ import (
 func (t *ldapLoginThrottle) resetForTest(now func() time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.users.entries = make(map[string]*throttleEntry)
-	t.ips.entries = make(map[string]*throttleEntry)
+	t.pairs.entries = make(map[ldapThrottleKey]*throttleEntry)
+	t.users.entries = make(map[ldapThrottleKey]*throttleEntry)
+	t.sources.entries = make(map[ldapThrottleKey]*throttleEntry)
+	t.maxEntries = ldapThrottleMaxEntries
 	t.lastSweep = time.Time{}
 	t.now = now
 }
@@ -61,6 +65,23 @@ func (f *fakeClock) advance(d time.Duration) {
 	f.t = f.t.Add(d)
 }
 
+func newTestLDAPThrottle() (*ldapLoginThrottle, *fakeClock) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	th := newLDAPLoginThrottle()
+	th.resetForTest(clk.now)
+	return th, clk
+}
+
+// failN makes n failed attempts and reports how many were admitted.
+func failN(th *ldapLoginThrottle, user, source string, n int) (admitted int) {
+	for range n {
+		if th.acquire(user, source) != nil {
+			admitted++
+		}
+	}
+	return admitted
+}
+
 func TestLDAPThrottleBackoffGrowth(t *testing.T) {
 	p := backoffPolicy{freeAttempts: 3, baseDelay: time.Second, maxDelay: 10 * time.Second}
 	want := []time.Duration{0, 0, 0, 1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second}
@@ -74,108 +95,170 @@ func TestLDAPThrottleBackoffGrowth(t *testing.T) {
 	}
 }
 
-func TestLDAPThrottleAcquire(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
-	th := newLDAPLoginThrottle()
-	th.resetForTest(clk.now)
-	u, ip := ldapThrottleUserKey("alice"), ldapThrottleIPKey("10.0.0.1")
+func TestLDAPThrottlePairBackoff(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
+	free := ldapThrottlePairPolicy.freeAttempts
 
-	for i := range ldapThrottleUserFreeAttempts {
-		if !th.acquire(u, ip) {
-			t.Fatalf("attempt %d should be admitted", i+1)
-		}
-	}
-	if th.acquire(u, ip) {
-		t.Fatal("attempt after free attempts should be throttled")
+	if n := failN(th, "alice", "10.0.0.1", free+3); n != free {
+		t.Fatalf("expected %d admitted attempts, got %d", free, n)
 	}
 	// Username normalization: case and surrounding space do not matter.
-	if th.acquire(ldapThrottleUserKey("  ALICE "), ldapThrottleIPKey("10.0.0.2")) {
-		t.Fatal("normalized username should share the counter")
+	if th.acquire("  ALICE ", "10.0.0.1") != nil {
+		t.Fatal("normalized username must share the pair counter")
+	}
+	// The same user from another source is not affected.
+	if a := th.acquire("alice", "10.0.0.2"); a == nil {
+		t.Fatal("victim from another source must not be blocked")
+	} else {
+		a.succeeded()
 	}
 
-	// Backoff grows: after the first window one more attempt is admitted,
-	// then the next window is twice as long.
-	clk.advance(ldapThrottleBaseDelay)
-	if !th.acquire(u, ip) {
+	// Backoff grows: one attempt after the first window, then a window
+	// twice as long.
+	clk.advance(ldapThrottlePairPolicy.baseDelay)
+	if th.acquire("alice", "10.0.0.1") == nil {
 		t.Fatal("attempt after first backoff window should be admitted")
 	}
-	clk.advance(ldapThrottleBaseDelay)
-	if th.acquire(u, ip) {
+	clk.advance(ldapThrottlePairPolicy.baseDelay)
+	if th.acquire("alice", "10.0.0.1") != nil {
 		t.Fatal("second backoff window should be longer than the first")
 	}
-	clk.advance(ldapThrottleBaseDelay)
-	if !th.acquire(u, ip) {
+	clk.advance(ldapThrottlePairPolicy.baseDelay)
+	a := th.acquire("alice", "10.0.0.1")
+	if a == nil {
 		t.Fatal("attempt after second backoff window should be admitted")
 	}
 
-	// Success resets the user counter.
-	th.release(u, ip)
-	for i := range ldapThrottleUserFreeAttempts - 1 {
-		if !th.acquire(u, ldapThrottleIPKey("10.0.0.3")) {
-			t.Fatalf("attempt %d after reset should be admitted", i+1)
-		}
+	// Success clears the pair.
+	a.succeeded()
+	if n := failN(th, "alice", "10.0.0.1", free); n != free {
+		t.Fatalf("success must clear the pair backoff, admitted %d", n)
 	}
 }
 
-func TestLDAPThrottleIPKey(t *testing.T) {
+func TestLDAPThrottleUserCeiling(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
+	ceiling := ldapThrottleUserPolicy.freeAttempts
+
+	// Distributed guessing: one failure per source.
+	for i := range ceiling {
+		if th.acquire("alice", fmt.Sprint("10.1.", i/250, ".", i%250)) == nil {
+			t.Fatalf("attempt %d below the ceiling should be admitted", i+1)
+		}
+	}
+	if th.acquire("alice", "10.9.9.9") != nil {
+		t.Fatal("user ceiling must apply across sources")
+	}
+
+	// A success does not reset the ceiling (only the pair).
+	clk.advance(ldapThrottleUserPolicy.baseDelay)
+	a := th.acquire("alice", "10.9.9.9")
+	if a == nil {
+		t.Fatal("attempt after ceiling backoff should be admitted")
+	}
+	a.succeeded()
+	if th.acquire("alice", "10.9.9.8") != nil {
+		t.Fatal("success must not reset the per-user ceiling")
+	}
+
+	// The ceiling is a fixed window: it resets after the window passes.
+	clk.advance(ldapThrottleEntryTTL + ldapThrottleUserPolicy.maxDelay + time.Second)
+	if th.acquire("alice", "10.9.9.7") == nil {
+		t.Fatal("ceiling should reset after its window")
+	}
+}
+
+func TestLDAPThrottleSourceSpray(t *testing.T) {
+	th, _ := newTestLDAPThrottle()
+	limit := ldapThrottleSourcePolicy.freeAttempts
+
+	for i := range limit {
+		if th.acquire(fmt.Sprint("user", i), "10.0.0.1") == nil {
+			t.Fatalf("distinct user %d below the spray limit should be admitted", i)
+		}
+	}
+	if th.acquire("another", "10.0.0.1") != nil {
+		t.Fatal("source spraying usernames must be throttled")
+	}
+	if th.acquire("another", "10.0.0.2") == nil {
+		t.Fatal("other sources must not be throttled")
+	}
+
+	// Repeated attempts for one user count against the pair only.
+	th2, _ := newTestLDAPThrottle()
+	failN(th2, "alice", "10.0.0.1", 50)
+	if th2.acquire("bob", "10.0.0.1") == nil {
+		t.Fatal("repeated failures for one user must not count as spraying")
+	}
+}
+
+func TestLDAPThrottleRefund(t *testing.T) {
+	th, _ := newTestLDAPThrottle()
+	// LDAP outages do not count as failed attempts.
+	for range 3 * ldapThrottleUserPolicy.freeAttempts {
+		a := th.acquire("alice", "10.0.0.1")
+		if a == nil {
+			t.Fatal("refunded attempts must not cause throttling")
+		}
+		a.notCredentialFailure()
+	}
+	if n := len(th.pairs.entries) + len(th.users.entries) + len(th.sources.entries); n != 0 {
+		t.Fatalf("refunded attempts must not leave entries, have %d", n)
+	}
+}
+
+func TestLDAPThrottleSourceIgnoresHeaders(t *testing.T) {
 	testCases := map[string]string{
-		"10.1.2.3":                "10.1.2.3",
-		"[2001:db8:1:2:3:4:5:6]":  "2001:db8:1:2::/64",
-		"2001:db8:1:2:ffff::1":    "2001:db8:1:2::/64",
-		"::ffff:192.0.2.1":        "192.0.2.1",
-		"not-an-ip":               "not-an-ip",
-		"fe80::1%eth0":            "fe80::/64",
-		"2001:db8:1:3:3:4:5:6":    "2001:db8:1:3::/64",
-		"[::ffff:198.51.100.200]": "198.51.100.200",
+		"10.1.2.3:4567":                 "10.1.2.3",
+		"[2001:db8:1:2:3:4:5:6]:9000":   "2001:db8:1:2::/64",
+		"[2001:db8:1:2:ffff::1]:9000":   "2001:db8:1:2::/64",
+		"[::ffff:192.0.2.1]:80":         "192.0.2.1",
+		"[fe80::1%eth0]:80":             "fe80::/64",
+		"10.1.2.3":                      "10.1.2.3",
+		"not-an-ip:80":                  "invalid",
+		strings.Repeat("x", 8000) + ":": "invalid",
 	}
-	for in, want := range testCases {
-		if got := ldapThrottleIPKey(in); got != want {
-			t.Errorf("ldapThrottleIPKey(%q) = %q, want %q", in, got, want)
+	for remote, want := range testCases {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = remote
+		// Spoofed forwarding headers must not change the source.
+		r.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+		r.Header.Set("X-Real-IP", "203.0.113.8")
+		r.Header.Set("Forwarded", "for=203.0.113.9")
+		if got := ldapThrottleSource(r); got != want {
+			t.Errorf("ldapThrottleSource(%q) = %q, want %q", remote, got, want)
 		}
 	}
 }
 
-func TestLDAPThrottleExpiryAndMemoryBound(t *testing.T) {
-	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
-	th := newLDAPLoginThrottle()
-	th.resetForTest(clk.now)
+func TestLDAPThrottleMemoryBound(t *testing.T) {
+	th, clk := newTestLDAPThrottle()
 	th.maxEntries = 10
 
-	// Expiry: idle entries are dropped once their block is over and the
-	// TTL has passed.
-	for i := range 5 {
-		th.acquire(ldapThrottleUserKey(fmt.Sprint("u", i)), "ip-a")
-	}
-	clk.advance(ldapThrottleEntryTTL + time.Second)
-	th.acquire(ldapThrottleUserKey("fresh"), "ip-b")
-	if n := len(th.users.entries); n != 1 {
-		t.Fatalf("expected expired user entries to be swept, have %d", n)
-	}
-	if _, ok := th.ips.entries["ip-a"]; ok {
-		t.Fatal("expected expired IP entry to be swept")
+	// Expiry: idle entries are swept.
+	failN(th, "u", "10.0.0.1", 1)
+	clk.advance(ldapThrottleEntryTTL + ldapThrottleSweepInterval + time.Second)
+	th.acquire("fresh", "10.0.0.2")
+	if n := len(th.pairs.entries); n != 1 {
+		t.Fatalf("expected expired entries to be swept, have %d pairs", n)
 	}
 
-	// Memory bound: the number of entries never exceeds maxEntries.
+	// A blocked attacker pair, then a flood of huge junk usernames: tables
+	// stay bounded, keys are fixed size and blocked entries are not evicted
+	// in favour of unblocked ones.
+	free := ldapThrottlePairPolicy.freeAttempts
+	failN(th, "victim", "10.0.0.66", free)
+	junk := strings.Repeat("j", 8<<10)
 	for i := range 1000 {
-		th.acquire(ldapThrottleUserKey(fmt.Sprint("spray", i)), fmt.Sprint("ip-", i))
-		if len(th.users.entries) > th.maxEntries || len(th.ips.entries) > th.maxEntries {
-			t.Fatalf("throttle exceeded its bound: users=%d ips=%d", len(th.users.entries), len(th.ips.entries))
+		th.acquire(fmt.Sprint(junk, i), fmt.Sprint("10.2.", i/250, ".", i%250))
+		for _, tbl := range []*throttleTable{&th.pairs, &th.users, &th.sources} {
+			if len(tbl.entries) > th.maxEntries {
+				t.Fatalf("throttle table exceeded its bound: %d", len(tbl.entries))
+			}
 		}
 	}
-
-	// Eviction prefers entries that are not blocked: a blocked user survives
-	// a flood of single attempts from other usernames.
-	th.resetForTest(clk.now)
-	th.maxEntries = 10
-	victim := ldapThrottleUserKey("victim")
-	for range ldapThrottleUserFreeAttempts {
-		th.acquire(victim, "ip-v")
-	}
-	for i := range 100 {
-		th.acquire(ldapThrottleUserKey(fmt.Sprint("flood", i)), fmt.Sprint("ip-f", i))
-	}
-	if th.acquire(victim, "ip-other") {
-		t.Fatal("blocked user must not be evicted in favour of unblocked entries")
+	if th.acquire("victim", "10.0.0.66") != nil {
+		t.Fatal("blocked pair must not be evicted in favour of unblocked entries")
 	}
 }
 
@@ -187,36 +270,36 @@ type ldapSTSResult struct {
 	body   string
 }
 
-func (s *TestSuiteIAM) ldapSTSRequest(c *check, user, pass, ip string, formBody bool) ldapSTSResult {
+func ldapSTSValues(user, pass string) url.Values {
 	v := url.Values{}
 	v.Set("Action", ldapIdentity)
 	v.Set("Version", stsAPIVersion)
 	v.Set("LDAPUsername", user)
 	v.Set("LDAPPassword", pass)
 	v.Set("DurationSeconds", "3600")
+	return v
+}
 
+func newLDAPSTSRequest(c *check, endpoint string, v url.Values, formBody bool) *http.Request {
 	var req *http.Request
 	var err error
 	if formBody {
-		req, err = http.NewRequest(http.MethodPost, s.endPoint+"/", strings.NewReader(v.Encode()))
+		req, err = http.NewRequest(http.MethodPost, endpoint+"/", strings.NewReader(v.Encode()))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
 	} else {
-		req, err = http.NewRequest(http.MethodPost, s.endPoint+"/?"+v.Encode(), nil)
+		req, err = http.NewRequest(http.MethodPost, endpoint+"/?"+v.Encode(), strings.NewReader(""))
 	}
 	if err != nil {
 		c.Fatalf("request error: %v", err)
 	}
-	req.Header.Set("X-Real-IP", ip)
-	resp, err := s.TestSuiteCommon.client.Do(req)
-	if err != nil {
-		c.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	res := ldapSTSResult{status: resp.StatusCode, body: string(b)}
-	if resp.StatusCode != http.StatusOK {
+	return req
+}
+
+func parseLDAPSTSResult(c *check, status int, b []byte) ldapSTSResult {
+	res := ldapSTSResult{status: status, body: string(b)}
+	if status != http.StatusOK {
 		var e STSErrorResponse
 		if err := xml.Unmarshal(b, &e); err != nil {
 			c.Fatalf("unable to parse STS error %q: %v", b, err)
@@ -238,11 +321,15 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 		goodPW  = "correct-horse"
 	)
 	var bindCalls atomic.Int64
+	ldapDown := atomic.Bool{}
 	oldBind := ldapBindFn
 	defer func() { ldapBindFn = oldBind }()
 	// Fake directory that fails the way cfgldap.Config.Bind does.
 	ldapBindFn = func(username, password string) (*xldap.DNSearchResult, []string, error) {
 		bindCalls.Add(1)
+		if ldapDown.Load() {
+			return nil, nil, fmt.Errorf("Could not connect to any LDAP server: dial tcp: connection refused")
+		}
 		var dn string
 		switch username {
 		case "alice":
@@ -258,8 +345,7 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 		return &xldap.DNSearchResult{NormDN: dn, ActualDN: dn}, []string{"cn=projecta,ou=groups,dc=min,dc=io"}, nil
 	}
 
-	ctx := context.Background()
-	if _, err := globalIAMSys.PolicyDBSet(ctx, aliceDN, "readwrite", stsUser, false); err != nil {
+	if _, err := globalIAMSys.PolicyDBSet(context.Background(), aliceDN, "readwrite", stsUser, false); err != nil {
 		c.Fatalf("unable to map policy: %v", err)
 	}
 
@@ -267,10 +353,29 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 	defer globalLDAPLoginThrottle.resetForTest(time.Now)
 	reset := func() { globalLDAPLoginThrottle.resetForTest(clk.now) }
 
-	assertDenied := func(name string, got, want ldapSTSResult) {
+	// Requests through the STS router with a chosen TCP peer address.
+	router := mux.NewRouter()
+	registerSTSRouter(router)
+	call := func(user, pass, remote string, formBody bool) ldapSTSResult {
+		req := newLDAPSTSRequest(c, "http://localhost", ldapSTSValues(user, pass), formBody)
+		req.RemoteAddr = remote
+		// Forwarding headers are attacker controlled and must be ignored.
+		req.Header.Set("X-Real-IP", fmt.Sprint("203.0.113.", bindCalls.Load()%250))
+		req.Header.Set("X-Forwarded-For", fmt.Sprint("198.18.0.", bindCalls.Load()%250))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return parseLDAPSTSResult(c, rec.Code, rec.Body.Bytes())
+	}
+
+	generic := ldapSTSResult{
+		status: http.StatusForbidden,
+		code:   stsErrCodes[ErrSTSAccessDenied].Code,
+		msg:    stsErrCodes[ErrSTSAccessDenied].Description,
+	}
+	assertDenied := func(name string, got ldapSTSResult) {
 		c.Helper()
-		if got.status != want.status || got.code != want.code || got.msg != want.msg {
-			c.Fatalf("%s: response differs: got %d/%s/%q, want %d/%s/%q", name, got.status, got.code, got.msg, want.status, want.code, want.msg)
+		if got.status != generic.status || got.code != generic.code || got.msg != generic.msg {
+			c.Fatalf("%s: response differs: got %d/%s/%q, want %d/%s/%q", name, got.status, got.code, got.msg, generic.status, generic.code, generic.msg)
 		}
 		for _, leak := range []string{"uid=", "dc=min", "alice", "bob", "nobody", "DN", "LDAP", "52e", "projecta"} {
 			if strings.Contains(got.body, leak) {
@@ -278,70 +383,93 @@ func TestLDAPSTSUniformErrorsAndThrottle(t *testing.T) {
 			}
 		}
 	}
-	generic := ldapSTSResult{
-		status: http.StatusForbidden,
-		code:   stsErrCodes[ErrSTSAccessDenied].Code,
-		msg:    stsErrCodes[ErrSTSAccessDenied].Description,
+	assertOK := func(name string, got ldapSTSResult) {
+		c.Helper()
+		if got.status != http.StatusOK || !strings.Contains(got.body, "<AccessKeyId>") {
+			c.Fatalf("%s: expected credentials, got %d %s", name, got.status, got.body)
+		}
 	}
+	const attacker, victim = "192.0.2.66:40000", "198.51.100.7:50000"
+	free := ldapThrottlePairPolicy.freeAttempts
 
-	// 1. Unknown user, wrong password and missing policy are indistinguishable.
+	// 1. Unknown user, wrong password and missing policy are
+	// indistinguishable, on both routes and over the real listener.
 	reset()
 	for _, formBody := range []bool{false, true} {
-		assertDenied("unknown user", suite.ldapSTSRequest(c, "nobody", "x", "192.0.2.1", formBody), generic)
-		assertDenied("wrong password", suite.ldapSTSRequest(c, "alice", "x", "192.0.2.2", formBody), generic)
-		assertDenied("no policy", suite.ldapSTSRequest(c, "bob", goodPW, "192.0.2.3", formBody), generic)
+		assertDenied("unknown user", call("nobody", "x", "192.0.2.1:1", formBody))
+		assertDenied("wrong password", call("alice", "x", "192.0.2.2:1", formBody))
+		assertDenied("no policy", call("bob", goodPW, "192.0.2.3:1", formBody))
+
+		for _, user := range []string{"nobody", "alice"} {
+			req := newLDAPSTSRequest(c, suite.endPoint, ldapSTSValues(user, "x"), formBody)
+			resp, err := suite.TestSuiteCommon.client.Do(req)
+			if err != nil {
+				c.Fatalf("request failed: %v", err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assertDenied("network "+user, parseLDAPSTSResult(c, resp.StatusCode, b))
+		}
 	}
 
-	// 2. After the free failures the user is throttled even with the correct
-	// password and from another IP, without contacting LDAP.
+	// 2. The attacker's source is blocked for the user, even with the correct
+	// password and rotating forwarding headers, without contacting LDAP;
+	// the victim from another source still logs in.
 	reset()
-	for range ldapThrottleUserFreeAttempts {
-		assertDenied("failure", suite.ldapSTSRequest(c, "alice", "x", "198.51.100.1", false), generic)
+	for range free {
+		assertDenied("failure", call("alice", "x", attacker, false))
 	}
 	calls := bindCalls.Load()
-	assertDenied("throttled user", suite.ldapSTSRequest(c, "alice", goodPW, "198.51.100.2", false), generic)
-	assertDenied("throttled unknown user", suite.ldapSTSRequest(c, "ALICE ", goodPW, "198.51.100.3", true), generic)
+	assertDenied("throttled pair", call("alice", goodPW, attacker, false))
+	assertDenied("throttled pair (variant, body route)", call("ALICE ", goodPW, attacker, true))
 	if bindCalls.Load() != calls {
 		c.Fatal("throttled requests must not reach LDAP")
 	}
+	assertOK("victim from another source", call("alice", goodPW, victim, false))
+	assertDenied("attacker still throttled after victim success", call("alice", goodPW, attacker, false))
 
-	// 3. After the backoff window the correct password succeeds and resets
-	// the user's counter.
-	clk.advance(ldapThrottleBaseDelay)
-	if res := suite.ldapSTSRequest(c, "alice", goodPW, "198.51.100.2", false); res.status != http.StatusOK || !strings.Contains(res.body, "<AccessKeyId>") {
-		c.Fatalf("expected credentials after backoff, got %d %s", res.status, res.body)
+	// 3. After the backoff window the correct password succeeds from the
+	// attacker's source too, and the success clears that pair.
+	clk.advance(ldapThrottlePairPolicy.baseDelay)
+	assertOK("after backoff", call("alice", goodPW, attacker, false))
+	for range free - 1 {
+		assertDenied("failure after success", call("alice", "x", attacker, false))
 	}
-	for range ldapThrottleUserFreeAttempts - 1 {
-		assertDenied("failure after reset", suite.ldapSTSRequest(c, "alice", "x", "198.51.100.4", false), generic)
-	}
-	if res := suite.ldapSTSRequest(c, "alice", goodPW, "198.51.100.4", false); res.status != http.StatusOK {
-		c.Fatalf("success must reset the user counter, got %d %s", res.status, res.body)
-	}
+	assertOK("pair cleared by success", call("alice", goodPW, attacker, false))
 
-	// 4. One IP spraying many usernames is throttled; other IPs are not.
+	// 4. One source spraying usernames is throttled; other sources are not.
 	reset()
-	for i := range ldapThrottleIPFreeAttempts {
-		assertDenied("spray", suite.ldapSTSRequest(c, fmt.Sprint("spray", i), "x", "203.0.113.9", i%2 == 0), generic)
+	for i := range ldapThrottleSourcePolicy.freeAttempts {
+		assertDenied("spray", call(fmt.Sprint("spray", i), "x", attacker, i%2 == 0))
 	}
 	calls = bindCalls.Load()
-	assertDenied("throttled IP", suite.ldapSTSRequest(c, "alice", goodPW, "203.0.113.9", false), generic)
+	assertDenied("throttled source", call("alice", goodPW, attacker, false))
 	if bindCalls.Load() != calls {
-		c.Fatal("throttled IP must not reach LDAP")
+		c.Fatal("throttled source must not reach LDAP")
 	}
-	if res := suite.ldapSTSRequest(c, "alice", goodPW, "203.0.113.10", false); res.status != http.StatusOK {
-		c.Fatalf("other IPs must not be throttled, got %d %s", res.status, res.body)
-	}
+	assertOK("other source", call("alice", goodPW, victim, false))
 
-	// 5. The POST body route (AssumeRoleWithSSO) is throttled too and shares
+	// 5. The POST body route (AssumeRoleWithSSO) is throttled and shares
 	// counters with the query route.
 	reset()
-	for range ldapThrottleUserFreeAttempts {
-		assertDenied("body failure", suite.ldapSTSRequest(c, "alice", "x", "198.51.100.20", true), generic)
+	for range free {
+		assertDenied("body failure", call("alice", "x", attacker, true))
 	}
 	calls = bindCalls.Load()
-	assertDenied("body throttled", suite.ldapSTSRequest(c, "alice", goodPW, "198.51.100.21", true), generic)
-	assertDenied("query throttled", suite.ldapSTSRequest(c, "alice", goodPW, "198.51.100.22", false), generic)
+	assertDenied("body throttled", call("alice", goodPW, attacker, true))
+	assertDenied("query throttled", call("alice", goodPW, attacker, false))
 	if bindCalls.Load() != calls {
 		c.Fatal("throttled body requests must not reach LDAP")
 	}
+
+	// 6. LDAP outages are not counted as failed attempts.
+	reset()
+	ldapDown.Store(true)
+	for range 3 * free {
+		if res := call("alice", goodPW, attacker, false); res.status != http.StatusInternalServerError || strings.Contains(res.body, "connect") {
+			c.Fatalf("expected generic upstream error, got %d %s", res.status, res.body)
+		}
+	}
+	ldapDown.Store(false)
+	assertOK("after outage", call("alice", goodPW, attacker, false))
 }

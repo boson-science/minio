@@ -19,27 +19,37 @@ package cmd
 
 import (
 	"crypto/sha256"
+	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Defaults for throttling AssumeRoleWithLDAPIdentity attempts. Limits are
-// in-memory and per node.
-const (
-	ldapThrottleUserFreeAttempts = 5
-	ldapThrottleIPFreeAttempts   = 20
-	ldapThrottleBaseDelay        = time.Second
-	ldapThrottleMaxDelay         = 5 * time.Minute
-	ldapThrottleEntryTTL         = time.Hour
-	ldapThrottleMaxEntries       = 50000 // per table
-	ldapThrottleSweepInterval    = time.Minute
-	ldapThrottleEvictScan        = 64
+// Limits for AssumeRoleWithLDAPIdentity attempts. All state is in-memory and
+// per node.
+//
+//   - pair: failures of one username from one source. This is what slows
+//     down a single client guessing one user's password, without affecting
+//     the same user logging in from elsewhere.
+//   - user: failures of one username across all sources within a fixed
+//     window. A high ceiling that caps distributed guessing.
+//   - source: distinct usernames failing from one source (password spraying).
+var (
+	ldapThrottlePairPolicy   = backoffPolicy{freeAttempts: 5, baseDelay: time.Second, maxDelay: 5 * time.Minute}
+	ldapThrottleUserPolicy   = backoffPolicy{freeAttempts: 50, baseDelay: time.Second, maxDelay: 5 * time.Minute}
+	ldapThrottleSourcePolicy = backoffPolicy{freeAttempts: 20, baseDelay: time.Second, maxDelay: 5 * time.Minute}
 )
 
-// globalLDAPLoginThrottle throttles LDAP STS logins per username and per
-// source IP.
+const (
+	ldapThrottleEntryTTL      = time.Hour // idle expiry, and the user ceiling window
+	ldapThrottleMaxEntries    = 50000     // per table
+	ldapThrottleSweepInterval = time.Minute
+	ldapThrottleEvictScan     = 64
+)
+
+// globalLDAPLoginThrottle throttles LDAP STS logins.
 var globalLDAPLoginThrottle = newLDAPLoginThrottle()
 
 // backoffPolicy describes the exponential backoff applied to a key once it
@@ -50,7 +60,7 @@ type backoffPolicy struct {
 	maxDelay     time.Duration
 }
 
-// delay returns the time a key must wait after its n-th unsuccessful attempt.
+// delay returns the time a key must wait after its n-th counted attempt.
 func (p backoffPolicy) delay(attempts int) time.Duration {
 	if attempts < p.freeAttempts {
 		return 0
@@ -62,30 +72,44 @@ func (p backoffPolicy) delay(attempts int) time.Duration {
 	return min(d, p.maxDelay)
 }
 
+// ldapThrottleKey is a fixed size key, so memory per entry does not depend
+// on client supplied input.
+type ldapThrottleKey [sha256.Size]byte
+
 type throttleEntry struct {
 	attempts     int
 	blockedUntil time.Time
+	firstSeen    time.Time
 	lastSeen     time.Time
 }
 
-func (e *throttleEntry) expired(now time.Time, ttl time.Duration) bool {
-	return !now.Before(e.blockedUntil) && now.Sub(e.lastSeen) > ttl
-}
-
 type throttleTable struct {
-	policy  backoffPolicy
-	entries map[string]*throttleEntry
+	policy backoffPolicy
+	// fixedWindow expires entries ttl after their first attempt (a rate
+	// ceiling); otherwise entries expire ttl after their last attempt.
+	fixedWindow bool
+	entries     map[ldapThrottleKey]*throttleEntry
 }
 
-// ldapLoginThrottle keeps exponential-backoff counters of unsuccessful LDAP
-// login attempts per normalized username and per source IP. An attempt is
-// counted when it is admitted and is forgiven only on a successful login, so
-// concurrent requests cannot exceed the free attempts. Memory is bounded by
-// expiring idle entries and capping the number of entries per table.
+func (tbl *throttleTable) expired(e *throttleEntry, now time.Time, ttl time.Duration) bool {
+	if now.Before(e.blockedUntil) {
+		return false
+	}
+	if tbl.fixedWindow {
+		return now.Sub(e.firstSeen) > ttl
+	}
+	return now.Sub(e.lastSeen) > ttl
+}
+
+// ldapLoginThrottle keeps exponential-backoff counters of LDAP login
+// attempts. An attempt is counted when it is admitted (so concurrent
+// requests cannot exceed the limits) and is refunded when it turns out not
+// to be a credential failure.
 type ldapLoginThrottle struct {
 	mu         sync.Mutex
+	pairs      throttleTable
 	users      throttleTable
-	ips        throttleTable
+	sources    throttleTable
 	ttl        time.Duration
 	maxEntries int
 	lastSweep  time.Time
@@ -94,97 +118,145 @@ type ldapLoginThrottle struct {
 
 func newLDAPLoginThrottle() *ldapLoginThrottle {
 	return &ldapLoginThrottle{
-		users: throttleTable{
-			policy:  backoffPolicy{ldapThrottleUserFreeAttempts, ldapThrottleBaseDelay, ldapThrottleMaxDelay},
-			entries: make(map[string]*throttleEntry),
-		},
-		ips: throttleTable{
-			policy:  backoffPolicy{ldapThrottleIPFreeAttempts, ldapThrottleBaseDelay, ldapThrottleMaxDelay},
-			entries: make(map[string]*throttleEntry),
-		},
+		pairs:      throttleTable{policy: ldapThrottlePairPolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
+		users:      throttleTable{policy: ldapThrottleUserPolicy, fixedWindow: true, entries: make(map[ldapThrottleKey]*throttleEntry)},
+		sources:    throttleTable{policy: ldapThrottleSourcePolicy, entries: make(map[ldapThrottleKey]*throttleEntry)},
 		ttl:        ldapThrottleEntryTTL,
 		maxEntries: ldapThrottleMaxEntries,
 		now:        time.Now,
 	}
 }
 
-// ldapThrottleUserKey normalizes a login username into a fixed size key.
-func ldapThrottleUserKey(username string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(username))))
-	return string(sum[:])
-}
-
-// ldapThrottleIPKey normalizes a source IP. IPv6 addresses are grouped by
-// their /64 prefix, which is what a single client usually controls.
-func ldapThrottleIPKey(ip string) string {
-	addr, err := netip.ParseAddr(strings.Trim(ip, "[]"))
+// ldapThrottleSource returns the throttling source of a request: the TCP
+// peer address, which unlike forwarding headers cannot be chosen by the
+// client. IPv6 peers are grouped by their /64 prefix.
+func ldapThrottleSource(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return ip
+		host = r.RemoteAddr
 	}
-	addr = addr.Unmap()
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return "invalid"
+	}
+	addr = addr.WithZone("").Unmap()
 	if addr.Is6() {
-		if p, err := addr.WithZone("").Prefix(64); err == nil {
+		if p, err := addr.Prefix(64); err == nil {
 			return p.String()
 		}
 	}
 	return addr.String()
 }
 
-// acquire reports whether a login attempt for the given keys may proceed. An
-// admitted attempt is counted against both keys until release is called.
-func (t *ldapLoginThrottle) acquire(userKey, ipKey string) bool {
+// ldapAttempt is an admitted login attempt.
+type ldapAttempt struct {
+	t       *ldapLoginThrottle
+	pair    ldapThrottleKey
+	user    ldapThrottleKey
+	source  ldapThrottleKey
+	newPair bool
+}
+
+// acquire admits a login attempt for username from source, or returns nil if
+// the attempt is throttled. The attempt is counted as a failure until
+// succeeded or notCredentialFailure is called.
+func (t *ldapLoginThrottle) acquire(username, source string) *ldapAttempt {
+	username = strings.ToLower(strings.TrimSpace(username))
+	a := &ldapAttempt{
+		t:      t,
+		pair:   sha256.Sum256([]byte("pair\x00" + username + "\x00" + source)),
+		user:   sha256.Sum256([]byte("user\x00" + username)),
+		source: sha256.Sum256([]byte("source\x00" + source)),
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.now()
 	if now.Sub(t.lastSweep) > ldapThrottleSweepInterval {
-		t.sweep(&t.users, now)
-		t.sweep(&t.ips, now)
+		for _, tbl := range []*throttleTable{&t.pairs, &t.users, &t.sources} {
+			for k, e := range tbl.entries {
+				if tbl.expired(e, now, t.ttl) {
+					delete(tbl.entries, k)
+				}
+			}
+		}
 		t.lastSweep = now
 	}
 
-	if t.blocked(&t.users, userKey, now) || t.blocked(&t.ips, ipKey, now) {
-		return false
+	if t.blocked(&t.pairs, a.pair, now) || t.blocked(&t.users, a.user, now) || t.blocked(&t.sources, a.source, now) {
+		return nil
 	}
-	t.count(&t.users, userKey, now)
-	t.count(&t.ips, ipKey, now)
-	return true
+	a.newPair = t.count(&t.pairs, a.pair, now)
+	t.count(&t.users, a.user, now)
+	if a.newPair {
+		// The source counts distinct usernames, not repeated attempts.
+		t.count(&t.sources, a.source, now)
+	}
+	return a
 }
 
-// release forgives the attempt admitted by acquire after a successful
-// login: the user's counter is reset and the attempt is refunded to the IP.
-func (t *ldapLoginThrottle) release(userKey, ipKey string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	delete(t.users.entries, userKey)
-	if e, ok := t.ips.entries[ipKey]; ok && e.attempts > 0 {
-		e.attempts--
+// succeeded clears the backoff of the (username, source) pair and refunds
+// the attempt to the per-user and per-source counters. It does not reset
+// the per-user ceiling.
+func (a *ldapAttempt) succeeded() {
+	a.t.mu.Lock()
+	defer a.t.mu.Unlock()
+	delete(a.t.pairs.entries, a.pair)
+	a.t.refund(&a.t.users, a.user)
+	if a.newPair {
+		a.t.refund(&a.t.sources, a.source)
 	}
 }
 
-func (t *ldapLoginThrottle) blocked(tbl *throttleTable, key string, now time.Time) bool {
+// notCredentialFailure refunds the attempt, e.g. when the LDAP server could
+// not be reached.
+func (a *ldapAttempt) notCredentialFailure() {
+	a.t.mu.Lock()
+	defer a.t.mu.Unlock()
+	a.t.refund(&a.t.pairs, a.pair)
+	a.t.refund(&a.t.users, a.user)
+	if a.newPair {
+		a.t.refund(&a.t.sources, a.source)
+	}
+}
+
+func (t *ldapLoginThrottle) refund(tbl *throttleTable, key ldapThrottleKey) {
+	e, ok := tbl.entries[key]
+	if !ok || e.attempts == 0 {
+		return
+	}
+	e.attempts--
+	if e.attempts == 0 {
+		delete(tbl.entries, key)
+		return
+	}
+	if tbl.policy.delay(e.attempts) == 0 {
+		e.blockedUntil = time.Time{}
+	}
+}
+
+func (t *ldapLoginThrottle) blocked(tbl *throttleTable, key ldapThrottleKey, now time.Time) bool {
 	e, ok := tbl.entries[key]
 	if !ok {
 		return false
 	}
-	if e.expired(now, t.ttl) {
+	if tbl.expired(e, now, t.ttl) {
 		delete(tbl.entries, key)
 		return false
 	}
 	return now.Before(e.blockedUntil)
 }
 
-func (t *ldapLoginThrottle) count(tbl *throttleTable, key string, now time.Time) {
+// count records an attempt for key and reports whether a new entry was
+// created.
+func (t *ldapLoginThrottle) count(tbl *throttleTable, key ldapThrottleKey, now time.Time) bool {
 	e, ok := tbl.entries[key]
 	if !ok {
 		if len(tbl.entries) >= t.maxEntries {
-			t.sweep(tbl, now)
-			if len(tbl.entries) >= t.maxEntries {
-				t.evictOne(tbl)
-			}
+			t.evictOne(tbl, now)
 		}
-		e = &throttleEntry{}
+		e = &throttleEntry{firstSeen: now}
 		tbl.entries[key] = e
 	}
 	e.attempts++
@@ -192,23 +264,21 @@ func (t *ldapLoginThrottle) count(tbl *throttleTable, key string, now time.Time)
 	if d := tbl.policy.delay(e.attempts); d > 0 {
 		e.blockedUntil = now.Add(d)
 	}
+	return !ok
 }
 
-func (t *ldapLoginThrottle) sweep(tbl *throttleTable, now time.Time) {
-	for k, e := range tbl.entries {
-		if e.expired(now, t.ttl) {
-			delete(tbl.entries, k)
-		}
-	}
-}
-
-// evictOne removes the entry whose block ends first among a bounded random
-// sample of entries, preferring entries that are not currently blocked.
-func (t *ldapLoginThrottle) evictOne(tbl *throttleTable) {
-	var victim string
+// evictOne removes one entry, chosen from a bounded random sample: an
+// expired entry if found, otherwise the one whose block ends first (entries
+// that are not blocked go first).
+func (t *ldapLoginThrottle) evictOne(tbl *throttleTable, now time.Time) {
+	var victim ldapThrottleKey
 	var victimUntil time.Time
 	n := 0
 	for k, e := range tbl.entries {
+		if tbl.expired(e, now, t.ttl) {
+			victim, n = k, 1
+			break
+		}
 		if n == 0 || e.blockedUntil.Before(victimUntil) {
 			victim, victimUntil = k, e.blockedUntil
 		}
