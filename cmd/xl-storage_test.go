@@ -59,6 +59,39 @@ func TestCheckPathLength(t *testing.T) {
 	}
 }
 
+func TestCheckPathComponents(t *testing.T) {
+	testCases := []struct {
+		paths       []string
+		expectedErr error
+	}{
+		{nil, nil},
+		{[]string{""}, nil},
+		{[]string{"object"}, nil},
+		{[]string{"prefix/nested/object", "prefix/"}, nil},
+		{[]string{".minio.sys/tmp/.trash/x", "multipart/abc/def/part.1"}, nil},
+		{[]string{"a/.b/..c/.../d..", "a. /. b"}, nil},
+		{[]string{"/abs/path"}, nil},
+		{[]string{"."}, errFileAccessDenied},
+		{[]string{".."}, errFileAccessDenied},
+		{[]string{"../x"}, errFileAccessDenied},
+		{[]string{"a/../../x"}, errFileAccessDenied},
+		{[]string{"a/./b"}, errFileAccessDenied},
+		{[]string{"/../x"}, errFileAccessDenied},
+		{[]string{`..\x`}, errFileAccessDenied},
+		{[]string{`a\..\..\x`}, errFileAccessDenied},
+		{[]string{" .. /x"}, errFileAccessDenied},
+		{[]string{"a/\t..\t/x"}, errFileAccessDenied},
+		{[]string{"ok", "../x"}, errFileAccessDenied},
+		{[]string{strings.Repeat("a", 33<<10)}, errFileAccessDenied},
+	}
+
+	for i, testCase := range testCases {
+		if gotErr := checkPathComponents(testCase.paths...); gotErr != testCase.expectedErr {
+			t.Errorf("case %d %q: expected %v, got %v", i, testCase.paths, testCase.expectedErr, gotErr)
+		}
+	}
+}
+
 // Tests validate volume name.
 func TestIsValidVolname(t *testing.T) {
 	testCases := []struct {
