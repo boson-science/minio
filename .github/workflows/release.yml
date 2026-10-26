@@ -55,6 +55,17 @@ jobs:
             git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/release/'
           fi
           test "$(jq '[.advisories[] | select(.status != "closed")] | length' security/advisory-matrix.json)" = 0
+          # A closed advisory must name regression tests in this repository, and
+          # every named test must exist and pass.
+          test "$(jq '[.advisories[] | select([.regression_tests[]? | select(.package)] | length == 0)] | length' security/advisory-matrix.json)" = 0
+          jq -r '[(.advisories[], .additional_fixes[]?) | .regression_tests[]? | select(.package)] | group_by(.package)[] | "\(.[0].package) \(map(.test) | unique | join(" "))"' security/advisory-matrix.json |
+          while read -r pkg tests; do
+            pattern="^($(tr ' ' '|' <<<"$tests"))$"
+            out="$(go test "$pkg" -count=1 -run "$pattern" -v 2>&1)" || { echo "$out"; exit 1; }
+            for t in $tests; do
+              grep -q -- "^--- PASS: $t " <<<"$out" || { echo "regression test $t in $pkg did not pass"; exit 1; }
+            done
+          done
           go test ./...
           go vet ./...
           go run golang.org/x/vuln/cmd/govulncheck@latest ./...
