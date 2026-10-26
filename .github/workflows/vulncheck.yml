@@ -11,7 +11,7 @@ permissions:
 jobs:
   vulncheck:
     name: Analysis
-    runs-on: tau-minio
+    runs-on: self-hosted
     steps:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v4

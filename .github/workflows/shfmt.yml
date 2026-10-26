@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     name: runner / shfmt
-    runs-on: tau-minio
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: luizm/action-sh-checker@master

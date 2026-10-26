@@ -6,7 +6,7 @@ on:
 jobs:
   run:
     name: Spell Check with Typos
-    runs-on: tau-minio
+    runs-on: self-hosted
     steps:
     - name: Checkout Actions Repository
       uses: actions/checkout@v4

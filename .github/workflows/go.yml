@@ -14,7 +14,7 @@ permissions:
 jobs:
   build:
     name: Go ${{ matrix.go-version }} on ${{ matrix.os }} - healing
-    runs-on: tau-minio
+    runs-on: self-hosted
     strategy:
       matrix:
         go-version: [1.24.x]

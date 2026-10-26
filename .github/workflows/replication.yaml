@@ -14,7 +14,7 @@ permissions:
 jobs:
   replication-test:
     name: Advanced Tests with Go ${{ matrix.go-version }}
-    runs-on: tau-minio
+    runs-on: self-hosted
 
     strategy:
       matrix:

@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   dependency-review:
-    runs-on: tau-minio
+    runs-on: self-hosted
     steps:
       - name: 'Checkout Repository'
         uses: actions/checkout@v4
