@@ -127,7 +127,7 @@ func getOpts(ctx context.Context, r *http.Request, bucket, object string) (Objec
 	}
 	opts.DeleteMarker = delMarker
 
-	replReadyCheck, err := parseBoolHeader(bucket, object, r.Header, xhttp.MinIOCheckDMReplicationReady)
+	replReadyCheck, err := parseBoolHeader(bucket, object, hdr, xhttp.MinIOCheckDMReplicationReady)
 	if err != nil {
 		return opts, err
 	}

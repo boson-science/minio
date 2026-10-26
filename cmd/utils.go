@@ -806,7 +806,7 @@ func newContext(r *http.Request, w http.ResponseWriter, api string) context.Cont
 		VersionID:    strings.TrimSpace(r.Form.Get(xhttp.VersionID)),
 	}
 
-	return logger.SetReqInfo(r.Context(), reqInfo)
+	return withReplicationAuthCache(logger.SetReqInfo(r.Context(), reqInfo))
 }
 
 // Used for registering with rest handlers (have a look at registerStorageRESTHandlers for usage example)

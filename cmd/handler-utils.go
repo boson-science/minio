@@ -25,6 +25,7 @@ import (
 	"net/textproto"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/minio/madmin-go/v3"
@@ -33,7 +34,6 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
-	"github.com/minio/mux"
 	xnet "github.com/minio/pkg/v3/net"
 	"github.com/minio/pkg/v3/policy"
 )
@@ -241,6 +241,7 @@ var replicationOnlyHeaders = []string{
 	xhttp.MinIOSourceTaggingTimestamp,
 	xhttp.MinIOSourceObjectRetentionTimestamp,
 	xhttp.MinIOSourceObjectLegalHoldTimestamp,
+	xhttp.MinIOCheckDMReplicationReady,
 }
 
 // hasReplicationOnlyHeaders returns true if the header contains any
@@ -277,10 +278,69 @@ func replicationSafeHeader(ctx context.Context, r *http.Request, bucket, object 
 	if !hasReplicationOnlyHeaders(r.Header) {
 		return r.Header
 	}
-	if isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, action) == ErrNone {
+	if replicationAllowed(ctx, r, bucket, object, action) {
 		return r.Header
 	}
 	return withoutReplicationOnlyHeaders(r.Header)
+}
+
+type replicationAuthKey struct {
+	bucket, object string
+	action         policy.Action
+}
+
+// replicationAuthCache caches replication permission decisions of a
+// request, see newContext.
+type replicationAuthCache struct {
+	mu sync.Mutex
+	m  map[replicationAuthKey]bool
+}
+
+type replicationAuthCacheKey struct{}
+
+// withReplicationAuthCache returns ctx with an empty replication permission cache.
+func withReplicationAuthCache(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replicationAuthCacheKey{}, &replicationAuthCache{})
+}
+
+// replicationAllowed returns true if the requester is allowed the
+// replication action (s3:ReplicateObject or s3:ReplicateDelete) on
+// bucket/object. The decision is cached in ctx, if it has a cache.
+func replicationAllowed(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) bool {
+	cache, _ := ctx.Value(replicationAuthCacheKey{}).(*replicationAuthCache)
+	key := replicationAuthKey{bucket: bucket, object: object, action: action}
+	if cache != nil {
+		cache.mu.Lock()
+		allowed, ok := cache.m[key]
+		cache.mu.Unlock()
+		if ok {
+			return allowed
+		}
+	}
+	allowed := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, action) == ErrNone
+	if cache != nil {
+		cache.mu.Lock()
+		if cache.m == nil {
+			cache.m = make(map[replicationAuthKey]bool)
+		}
+		cache.m[key] = allowed
+		cache.mu.Unlock()
+	}
+	return allowed
+}
+
+// checkReplicationRequestClaim rejects requests that claim to be
+// replication requests (X-Minio-Source-Replication-Request) for writes to
+// bucket/object from principals not allowed s3:ReplicateObject, instead
+// of silently dropping the replicated object state.
+func checkReplicationRequestClaim(ctx context.Context, r *http.Request, bucket, object string) APIErrorCode {
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; !ok {
+		return ErrNone
+	}
+	if !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
+		return ErrAccessDenied
+	}
+	return ErrNone
 }
 
 // hasReplicationMetadata returns true if the header contains any of the
@@ -307,8 +367,8 @@ func replicationMetadataAllowed(ctx context.Context, r *http.Request, bucket, ob
 	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; !ok {
 		return false, ErrNone
 	}
-	if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
-		return false, s3Err
+	if !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
+		return false, ErrAccessDenied
 	}
 	return r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true", ErrNone
 }
@@ -358,21 +418,21 @@ func extractReqParams(r *http.Request) map[string]string {
 		m["range"] = rangeField
 	}
 
-	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
-		// Suppresses event notifications, only honour it from replicators.
-		vars := mux.Vars(r)
-		bucket := vars["bucket"]
-		object, err := unescapePath(vars["object"])
-		if err != nil {
-			object = vars["object"]
-		}
-		action := policy.Action(policy.ReplicateObjectAction)
-		if r.Method == http.MethodDelete {
-			action = policy.ReplicateDeleteAction
-		}
-		if _, ok := replicationSafeHeader(r.Context(), r, bucket, object, action)[xhttp.MinIOSourceReplicationRequest]; ok {
-			m[xhttp.MinIOSourceReplicationRequest] = ""
-		}
+	return m
+}
+
+// extractObjectReqParams is like extractReqParams for events on
+// bucket/object. Events of replication requests are not notified, the
+// request is treated as one only if the requester is allowed the
+// replication action (s3:ReplicateObject or s3:ReplicateDelete) on
+// bucket/object.
+func extractObjectReqParams(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) map[string]string {
+	m := extractReqParams(r)
+	if m == nil {
+		return nil
+	}
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok && replicationAllowed(ctx, r, bucket, object, action) {
+		m[xhttp.MinIOSourceReplicationRequest] = ""
 	}
 	return m
 }

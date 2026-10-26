@@ -38,8 +38,11 @@ import (
 
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio/internal/event"
 	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/minio/internal/pubsub"
 	"github.com/minio/mux"
+	"github.com/minio/pkg/v3/policy"
 )
 
 // replicationMetadataTestHeaders returns the replication-only metadata
@@ -132,6 +135,27 @@ func TestReplicationMetadataNotAllowedWithoutSourceHeader(t *testing.T) {
 	}
 }
 
+func TestReplicationAllowedCache(t *testing.T) {
+	r := httptestNewRequest(t)
+	ctx := withReplicationAuthCache(t.Context())
+	cache := ctx.Value(replicationAuthCacheKey{}).(*replicationAuthCache)
+	// A cached decision is returned without evaluating the policy again.
+	cache.m = map[replicationAuthKey]bool{
+		{bucket: "bucket", object: "object", action: policy.ReplicateDeleteAction}: true,
+	}
+	if !replicationAllowed(ctx, r, "bucket", "object", policy.ReplicateDeleteAction) {
+		t.Fatal("expected cached decision")
+	}
+	// Decisions are per (bucket, object, action): an unsigned request is
+	// not allowed s3:ReplicateObject and the result is cached.
+	if replicationAllowed(ctx, r, "bucket", "object", policy.ReplicateObjectAction) {
+		t.Fatal("unexpected replication permission")
+	}
+	if allowed, ok := cache.m[replicationAuthKey{bucket: "bucket", object: "object", action: policy.ReplicateObjectAction}]; !ok || allowed {
+		t.Fatalf("decision not cached: %v %v", allowed, ok)
+	}
+}
+
 func httptestNewRequest(t *testing.T) *http.Request {
 	t.Helper()
 	r, err := http.NewRequest(http.MethodPut, "http://localhost/bucket/object", nil)
@@ -163,17 +187,30 @@ func TestContainsReservedMetadataInternalSSEKeys(t *testing.T) {
 // objects of the given buckets.
 func replTestUser(ctx context.Context, c *check, s *TestSuiteIAM, name string, buckets []string, actions ...string) madmin.Credentials {
 	c.Helper()
+	return replTestUserStatements(ctx, c, s, name, replTestStatement(buckets, actions...))
+}
+
+// replTestStatement returns a policy statement allowing actions on the
+// objects of the given buckets.
+func replTestStatement(buckets []string, actions ...string) map[string]any {
 	resources := make([]string, 0, len(buckets))
 	for _, b := range buckets {
 		resources = append(resources, "arn:aws:s3:::"+b+"/*")
 	}
+	return map[string]any{
+		"Effect":   "Allow",
+		"Action":   actions,
+		"Resource": resources,
+	}
+}
+
+// replTestUserStatements creates an IAM user with a policy made of the
+// given statements.
+func replTestUserStatements(ctx context.Context, c *check, s *TestSuiteIAM, name string, statements ...map[string]any) madmin.Credentials {
+	c.Helper()
 	pol := map[string]any{
-		"Version": "2012-10-17",
-		"Statement": []map[string]any{{
-			"Effect":   "Allow",
-			"Action":   actions,
-			"Resource": resources,
-		}},
+		"Version":   "2012-10-17",
+		"Statement": statements,
 	}
 	polBytes, err := json.Marshal(pol)
 	if err != nil {
@@ -545,15 +582,21 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		xhttp.MinIOSourceETag:  srcETag,
 		xhttp.MinIOSourceMTime: srcMTime.Format(time.RFC3339Nano),
 	})
+	withoutSourceRepl := func(m map[string]string) map[string]string {
+		out := merge(m)
+		delete(out, xhttp.MinIOSourceReplicationRequest)
+		return out
+	}
 	for _, tc := range []struct {
 		cred     madmin.Credentials
 		object   string
+		hdrs     map[string]string
 		preserve bool
 	}{
-		{user, "preserve-user", false},
-		{replicator, "preserve-replicator", true},
+		{user, "preserve-user", withoutSourceRepl(preserve), false},
+		{replicator, "preserve-replicator", preserve, true},
 	} {
-		resp, body := do(tc.cred, http.MethodPut, objURL(bucket, tc.object, nil), data, preserve)
+		resp, body := do(tc.cred, http.MethodPut, objURL(bucket, tc.object, nil), data, tc.hdrs)
 		expectStatus("PutObject "+tc.object, resp, body, http.StatusOK)
 		oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, tc.object, ObjectOptions{})
 		if err != nil {
@@ -567,13 +610,54 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		}
 	}
 
+	// Replication claims of writes by non-replicators are rejected
+	// instead of silently dropping the replicated object state.
+	resp, body := do(user, http.MethodPut, objURL(bucket, "claim-put", nil), data, preserve)
+	expectStatus("PutObject replication claim", resp, body, http.StatusForbidden)
+	resp, body = do(user, http.MethodPost, objURL(bucket, "claim-mp", url.Values{"uploads": {""}}), nil, preserve)
+	expectStatus("NewMultipartUpload replication claim", resp, body, http.StatusForbidden)
+	resp, body = do(user, http.MethodPut, objURL(bucket, "claim-copy", nil), nil, merge(preserve, map[string]string{
+		xhttp.AmzCopySource: "/" + bucket + "/preserve-user",
+	}))
+	expectStatus("CopyObject replication claim", resp, body, http.StatusForbidden)
+	tarWith := func(name string, pax map[string]string) []byte {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name, Mode: 0o600, Size: int64(len(data)), ModTime: time.Now(),
+			Format: tar.FormatPAX, PAXRecords: pax, Typeflag: tar.TypeReg,
+		}); err != nil {
+			c.Fatal(err)
+		}
+		tw.Write(data)
+		tw.Close()
+		return buf.Bytes()
+	}
+	snowball := map[string]string{xhttp.AmzSnowballExtract: "true"}
+	resp, body = do(user, http.MethodPut, objURL(bucket, "claim.tar", nil), tarWith("claim-extract", map[string]string{"minio.metadata.foo": "bar"}), merge(snowball, sourceRepl))
+	expectStatus("PutObjectExtract replication claim", resp, body, http.StatusForbidden)
+	resp, body = do(user, http.MethodPut, objURL(bucket, "claim-pax.tar", nil), tarWith("claim-pax", map[string]string{
+		"minio.metadata." + xhttp.MinIOSourceReplicationRequest: "true",
+		"minio.metadata." + xhttp.MinIOSourceETag:               srcETag,
+	}), snowball)
+	if resp.StatusCode == http.StatusOK {
+		c.Fatalf("PutObjectExtract PAX replication claim: unexpected success")
+	}
+	for _, object := range []string{"claim-put", "claim-mp", "claim-copy", "claim-extract", "claim-pax"} {
+		if _, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, object, ObjectOptions{}); err == nil {
+			c.Fatalf("%s: object created by rejected replication claim", object)
+		}
+	}
+
 	// 2. Past retain-until dates are accepted only from replicators.
 	pastRetention := merge(sourceRepl, map[string]string{
 		xhttp.AmzObjectLockMode:            "GOVERNANCE",
 		xhttp.AmzObjectLockRetainUntilDate: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 	})
-	resp, body := do(user, http.MethodPut, objURL(lockBucket, "retention", nil), data, pastRetention)
-	expectStatus("PutObject past retention by user", resp, body, http.StatusBadRequest)
+	resp, body = do(user, http.MethodPut, objURL(lockBucket, "retention", nil), data, pastRetention)
+	expectStatus("PutObject past retention by user", resp, body, http.StatusForbidden)
+	resp, body = do(user, http.MethodPut, objURL(lockBucket, "retention", nil), data, withoutSourceRepl(pastRetention))
+	expectStatus("PutObject past retention by user without claim", resp, body, http.StatusBadRequest)
 	resp, body = do(replicator, http.MethodPut, objURL(lockBucket, "retention", nil), data, pastRetention)
 	expectStatus("PutObject past retention by replicator", resp, body, http.StatusOK)
 
@@ -597,7 +681,7 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		if err != nil {
 			c.Fatal(err)
 		}
-		_, evtSuppressed := extractReqParams(req)[xhttp.MinIOSourceReplicationRequest]
+		_, evtSuppressed := extractObjectReqParams(ctx, req, bucket, object, policy.ReplicateObjectAction)[xhttp.MinIOSourceReplicationRequest]
 		if popts.ReplicationRequest != tc.want || gopts.ReplicationRequest != tc.want || evtSuppressed != tc.want {
 			c.Fatalf("%s: replication request put=%v get=%v event=%v, want %v", tc.cred.AccessKey,
 				popts.ReplicationRequest, gopts.ReplicationRequest, evtSuppressed, tc.want)
@@ -707,7 +791,29 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 	resp, body = do(user, http.MethodPut, objURL(bucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
 		xhttp.AmzCopySource: "/" + bucket + "/ssec",
 	}))
-	expectStatus("CopyObject SSE-C without key by user", resp, body, http.StatusBadRequest)
+	expectStatus("CopyObject SSE-C without key by user", resp, body, http.StatusForbidden)
+	// Reading the copy source without its key requires s3:ReplicateObject
+	// on the source, not only on the destination.
+	dstReplicator := replTestUserStatements(ctx, c, s, "replhdr-dst-replicator",
+		replTestStatement(buckets, "s3:PutObject", "s3:GetObject"),
+		replTestStatement([]string{lockBucket}, "s3:ReplicateObject"))
+	resp, body = do(dstReplicator, http.MethodPut, objURL(lockBucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
+		xhttp.AmzCopySource: "/" + bucket + "/ssec",
+	}))
+	expectStatus("CopyObject SSE-C without key by destination replicator", resp, body, http.StatusBadRequest)
+	// either SSE-C key error: missing key for the encrypted source object
+	sseAlgErr := []byte("Server Side Encryption")
+	if !bytes.Contains(body, sseAlgErr) {
+		c.Fatalf("CopyObject SSE-C without key by destination replicator: want SSE-C key error, got %s", body)
+	}
+	// A source replicator passes the key check (raw copies of SSE-C objects
+	// to other objects are not a replication flow and fail later).
+	resp, body = do(replicator, http.MethodPut, objURL(lockBucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
+		xhttp.AmzCopySource: "/" + bucket + "/ssec",
+	}))
+	if bytes.Contains(body, sseAlgErr) {
+		c.Fatalf("CopyObject SSE-C without key by replicator: unexpected SSE-C key error: %s", body)
+	}
 	oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "ssec", ObjectOptions{})
 	if err != nil {
 		c.Fatal(err)
@@ -723,6 +829,55 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 		info := oi.Clone()
 		if _, err = DecryptObjectInfo(&info, req); err != tc.wantErr {
 			c.Fatalf("%s: DecryptObjectInfo without key: want %v, got %v", tc.cred.AccessKey, tc.wantErr, err)
+		}
+	}
+
+	// 7. DeleteObjects notifications are suppressed only for principals
+	//    allowed s3:ReplicateDelete on the deleted object.
+	evCh := make(chan event.Event, 100)
+	doneCh := make(chan struct{})
+	defer close(doneCh)
+	var mask pubsub.Mask
+	mask.MergeMaskable(event.ObjectRemovedDelete)
+	if err := globalHTTPListen.Subscribe(mask, evCh, doneCh, func(ev event.Event) bool {
+		return ev.S3.Bucket.Name == bucket
+	}); err != nil {
+		c.Fatal(err)
+	}
+	deleters := []struct {
+		name       string
+		cred       madmin.Credentials
+		suppressed bool
+	}{
+		{"replicate-object", replTestUser(ctx, c, s, "replhdr-del-repl-object", buckets, "s3:PutObject", "s3:DeleteObject", "s3:ReplicateObject"), false},
+		{"replicate-delete", replTestUser(ctx, c, s, "replhdr-del-repl-delete", buckets, "s3:PutObject", "s3:DeleteObject", "s3:ReplicateDelete"), true},
+	}
+	for _, d := range deleters {
+		object := "delete-" + d.name
+		resp, body = do(user, http.MethodPut, objURL(bucket, object, nil), data, nil)
+		expectStatus("PutObject "+object, resp, body, http.StatusOK)
+		delBody := []byte("<Delete><Object><Key>" + object + "</Key></Object></Delete>")
+		resp, body = do(d.cred, http.MethodPost, objURL(bucket, "", url.Values{"delete": {""}}), delBody, sourceRepl)
+		expectStatus("DeleteObjects "+d.name, resp, body, http.StatusOK)
+		if !bytes.Contains(body, []byte("<Deleted>")) {
+			c.Fatalf("DeleteObjects %s: object not deleted: %s", d.name, body)
+		}
+		notified := false
+		timeout := time.After(2 * time.Second)
+	wait:
+		for {
+			select {
+			case ev := <-evCh:
+				if ev.S3.Object.Key == object {
+					notified = true
+					break wait
+				}
+			case <-timeout:
+				break wait
+			}
+		}
+		if notified == d.suppressed {
+			c.Fatalf("DeleteObjects %s: notified=%v, want suppressed=%v", d.name, notified, d.suppressed)
 		}
 	}
 }

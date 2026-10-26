@@ -85,6 +85,10 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		return
 	}
 
+	if s3Err := checkReplicationRequestClaim(ctx, r, bucket, object); s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
 	// Replication-only metadata is honoured only for authorized replication requests.
 	var replMeta bool
 	if hasReplicationMetadata(r.Header) {
@@ -1092,7 +1096,7 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 		EventName:    event.ObjectCreatedCompleteMultipartUpload,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    extractObjectReqParams(ctx, r, bucket, objInfo.Name, policy.ReplicateObjectAction),
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
 		Host:         handlers.GetSourceIP(r),
