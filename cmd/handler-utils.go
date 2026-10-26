@@ -34,6 +34,7 @@ import (
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
 	xnet "github.com/minio/pkg/v3/net"
+	"github.com/minio/pkg/v3/policy"
 )
 
 const (
@@ -84,12 +85,6 @@ var supportedHeaders = []string{
 	xhttp.AmzObjectTagging,
 	"expires",
 	xhttp.AmzBucketReplicationStatus,
-	"X-Minio-Replication-Server-Side-Encryption-Sealed-Key",
-	"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm",
-	"X-Minio-Replication-Server-Side-Encryption-Iv",
-	"X-Minio-Replication-Encrypted-Multipart",
-	"X-Minio-Replication-Actual-Object-Size",
-	ReplicationSsecChecksumHeader,
 	// Add more supported headers here.
 }
 
@@ -103,7 +98,13 @@ var validSSEReplicationHeaders = map[string]string{
 	// Add more supported headers here.
 }
 
-// mapping of replication headers to internal headers
+// mapping of replication headers to internal headers.
+//
+// These headers carry internal object metadata (SSE seal parameters, actual
+// object size and the encrypted SSE-C checksum) from a replication source.
+// They are never extracted as regular metadata and are only honoured from
+// the headers of authorized replication requests, see
+// replicationMetadataAllowed and extractReplicationMetadata.
 var replicationToInternalHeaders = map[string]string{
 	"X-Minio-Replication-Server-Side-Encryption-Sealed-Key":     "X-Minio-Internal-Server-Side-Encryption-Sealed-Key",
 	"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm": "X-Minio-Internal-Server-Side-Encryption-Seal-Algorithm",
@@ -207,11 +208,7 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 	for _, supportedHeader := range supportedHeaders {
 		value, ok := nv[http.CanonicalHeaderKey(supportedHeader)]
 		if ok {
-			if v, ok := replicationToInternalHeaders[supportedHeader]; ok {
-				m[v] = strings.Join(value, ",")
-			} else {
-				m[supportedHeader] = strings.Join(value, ",")
-			}
+			m[supportedHeader] = strings.Join(value, ",")
 		}
 	}
 
@@ -228,6 +225,47 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 		}
 	}
 	return nil
+}
+
+// hasReplicationMetadata returns true if the header contains any of the
+// replication-only metadata headers.
+func hasReplicationMetadata(h http.Header) bool {
+	for k := range replicationToInternalHeaders {
+		if _, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// replicationMetadataAllowed reports whether the replication-only metadata
+// headers of r may be honoured. This is only the case for replication
+// requests (X-Minio-Source-Replication-Request: true) sent by a principal
+// allowed to perform s3:ReplicateObject on the object.
+//
+// If r is marked as a replication request but the principal is not
+// allowed to replicate, the corresponding error is returned. If r is not
+// marked as a replication request, false is returned and the
+// replication-only metadata must be ignored.
+func replicationMetadataAllowed(ctx context.Context, r *http.Request, bucket, object string) (bool, APIErrorCode) {
+	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; !ok {
+		return false, ErrNone
+	}
+	if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
+		return false, s3Err
+	}
+	return r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true", ErrNone
+}
+
+// extractReplicationMetadata copies the replication-only metadata headers
+// into m using their internal metadata names. Callers must verify with
+// replicationMetadataAllowed that the request may set them.
+func extractReplicationMetadata(h http.Header, m map[string]string) {
+	for k, internal := range replicationToInternalHeaders {
+		if v, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			m[internal] = strings.Join(v, ",")
+		}
+	}
 }
 
 // Returns access credentials in the request Authorization header.

@@ -485,12 +485,15 @@ func completeMultipartOpts(ctx context.Context, r *http.Request, bucket, object 
 			}
 		}
 	}
-	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
+	// The replicated actual size and SSE-C checksum are only accepted from
+	// authorized replication requests. Otherwise the request is completed
+	// like a regular upload and the server computes these values.
+	if replMeta, _ := replicationMetadataAllowed(ctx, r, bucket, object); replMeta {
 		opts.ReplicationRequest = true
 		opts.UserDefined[ReservedMetadataPrefix+"Actual-Object-Size"] = r.Header.Get(xhttp.MinIOReplicationActualObjectSize)
-	}
-	if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
-		opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+		if r.Header.Get(ReplicationSsecChecksumHeader) != "" {
+			opts.UserDefined[ReplicationSsecChecksumHeader] = r.Header.Get(ReplicationSsecChecksumHeader)
+		}
 	}
 	return opts, nil
 }

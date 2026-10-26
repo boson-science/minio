@@ -85,6 +85,16 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		return
 	}
 
+	// Replication-only metadata is honoured only for authorized replication requests.
+	var replMeta bool
+	if hasReplicationMetadata(r.Header) {
+		var s3Err APIErrorCode
+		if replMeta, s3Err = replicationMetadataAllowed(ctx, r, bucket, object); s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	}
+
 	// Check if bucket encryption is enabled
 	sseConfig, _ := globalBucketSSEConfigSys.Get(bucket)
 	sseConfig.Apply(r.Header, sse.ApplyOptions{
@@ -117,7 +127,6 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 			return
 		}
 
-		_, sourceReplReq := r.Header[xhttp.MinIOSourceReplicationRequest]
 		ssecRepHeaders := []string{
 			"X-Minio-Replication-Server-Side-Encryption-Seal-Algorithm",
 			"X-Minio-Replication-Server-Side-Encryption-Sealed-Key",
@@ -130,7 +139,7 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 				break
 			}
 		}
-		if !ssecRep || !sourceReplReq {
+		if !ssecRep || !replMeta {
 			if err = setEncryptionMetadata(r, bucket, object, encMetadata); err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 				return
@@ -147,6 +156,9 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
+	if replMeta {
+		extractReplicationMetadata(r.Header, metadata)
+	}
 
 	if objTags := r.Header.Get(xhttp.AmzObjectTagging); objTags != "" {
 		if _, err := tags.ParseObjectTags(objTags); err != nil {
@@ -157,6 +169,10 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		metadata[xhttp.AmzObjectTagging] = objTags
 	}
 	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
+		if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
 		metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 	}
