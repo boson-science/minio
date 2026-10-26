@@ -134,13 +134,22 @@ func sshPasswordAuth(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) 
 	return authenticateSSHConnection(c, nil, pass)
 }
 
+// sshRemoteAddr returns the client address of an SSH connection, or "" if
+// unknown.
+func sshRemoteAddr(c ssh.ConnMetadata) string {
+	if addr := c.RemoteAddr(); addr != nil {
+		return addr.String()
+	}
+	return ""
+}
+
 func authenticateSSHConnection(c ssh.ConnMetadata, key ssh.PublicKey, pass []byte) (*ssh.Permissions, error) {
 	user, found := strings.CutSuffix(c.User(), "=ldap")
 	if found {
 		if !globalIAMSys.LDAPConfig.Enabled() {
 			return nil, errSFTPLDAPNotEnabled
 		}
-		return processLDAPAuthentication(key, pass, user)
+		return processLDAPAuthentication(key, pass, user, sshRemoteAddr(c))
 	}
 
 	user, found = strings.CutSuffix(c.User(), "=svc")
@@ -149,7 +158,7 @@ func authenticateSSHConnection(c ssh.ConnMetadata, key ssh.PublicKey, pass []byt
 	}
 
 	if globalIAMSys.LDAPConfig.Enabled() {
-		perms, _ := processLDAPAuthentication(key, pass, user)
+		perms, _ := processLDAPAuthentication(key, pass, user, sshRemoteAddr(c))
 		if perms != nil {
 			return perms, nil
 		}
@@ -190,7 +199,7 @@ internalAuth:
 	}, nil
 }
 
-func processLDAPAuthentication(key ssh.PublicKey, pass []byte, user string) (perms *ssh.Permissions, err error) {
+func processLDAPAuthentication(key ssh.PublicKey, pass []byte, user, remoteAddr string) (perms *ssh.Permissions, err error) {
 	var lookupResult *xldap.DNSearchResult
 	var targetGroups []string
 
@@ -218,10 +227,12 @@ func processLDAPAuthentication(key ssh.PublicKey, pass []byte, user string) (per
 			return nil, err
 		}
 
-		lookupResult, targetGroups, err = globalIAMSys.LDAPConfig.Bind(user, string(pass))
+		var attempt *ldapAttempt
+		lookupResult, targetGroups, attempt, err = ldapThrottledBind(user, string(pass), ldapThrottleSourceOfAddr(remoteAddr))
 		if err != nil {
 			return nil, err
 		}
+		attempt.succeeded()
 	} else if key != nil {
 		lookupResult, targetGroups, err = globalIAMSys.LDAPConfig.LookupUserDN(user)
 		if err != nil {

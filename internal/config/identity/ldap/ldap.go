@@ -18,6 +18,8 @@
 package ldap
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -227,8 +229,53 @@ func (l *Config) GetValidatedDNWithGroups(username string) (*xldap.DNSearchResul
 	return lookupRes, groups, nil
 }
 
+// ErrInvalidCredentials is returned (wrapped) by Bind when the username is
+// unknown or ambiguous or when the LDAP server rejects the user bind. The
+// wrapping error carries diagnostic details (such as the user DN) that are
+// meant for server-side logs only and must never be returned to clients.
+var ErrInvalidCredentials = errors.New("invalid LDAP credentials")
+
+// isUserLookupMiss reports whether an error from LookupUsername means that the
+// username did not resolve to exactly one user DN.
+func isUserLookupMiss(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "User DN not found for") ||
+		strings.Contains(msg, "Multiple DNs for")
+}
+
+// isNetworkError reports whether err is a client-side network failure (the
+// connection to the LDAP server failed) rather than a server response.
+func isNetworkError(err error) bool {
+	return ldap.IsErrorWithCode(err, ldap.ErrorNetwork)
+}
+
+// unknownUserError returns the error of Bind for an unknown or ambiguous
+// user, given the lookup error and the result of the dummy bind. A network
+// failure of the dummy bind is reported like one of the user bind (as an
+// upstream error), so connectivity problems do not tell users apart either.
+func unknownUserError(lookupErr, dummyBindErr error) error {
+	if dummyBindErr != nil && isNetworkError(dummyBindErr) {
+		return fmt.Errorf("LDAP bind failed: %w", dummyBindErr)
+	}
+	return fmt.Errorf("%w: unable to find user DN: %v", ErrInvalidCredentials, lookupErr)
+}
+
+// dummyBindDN returns a random DN under the first configured user search base
+// that is not expected to exist in the directory.
+func (l *Config) dummyBindDN() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	dn := "cn=minio-nonexistent-" + hex.EncodeToString(b[:])
+	base, _, _ := strings.Cut(l.LDAP.UserDNSearchBaseDistName, ";")
+	if base = strings.TrimSpace(base); base != "" {
+		dn += "," + base
+	}
+	return dn
+}
+
 // Bind - binds to ldap, searches LDAP and returns the distinguished name of the
-// user and the list of groups.
+// user and the list of groups. Failures caused by the supplied credentials
+// (unknown user, ambiguous user, rejected bind) wrap ErrInvalidCredentials.
 func (l *Config) Bind(username, password string) (*xldap.DNSearchResult, []string, error) {
 	conn, err := l.LDAP.Connect()
 	if err != nil {
@@ -244,15 +291,25 @@ func (l *Config) Bind(username, password string) (*xldap.DNSearchResult, []strin
 	// Lookup user DN
 	lookupResult, err := l.LDAP.LookupUsername(conn, username)
 	if err != nil {
-		errRet := fmt.Errorf("Unable to find user DN: %w", err)
-		return nil, nil, errRet
+		if !isUserLookupMiss(err) {
+			return nil, nil, fmt.Errorf("Unable to find user DN: %w", err)
+		}
+		// Perform a bind that is bound to fail, so that an unknown or
+		// ambiguous username costs the same LDAP round trips (one search
+		// and one failed bind) as a known username with a wrong password.
+		return nil, nil, unknownUserError(err, conn.Bind(l.dummyBindDN(), password))
 	}
 
-	// Authenticate the user credentials.
+	// Authenticate the user credentials. A failure of the user bind is
+	// reported as invalid credentials, so that server diagnostics (such as
+	// account state) cannot be used to tell users apart, unless the
+	// connection itself failed.
 	err = conn.Bind(lookupResult.ActualDN, password)
 	if err != nil {
-		errRet := fmt.Errorf("LDAP auth failed for DN %s: %w", lookupResult.ActualDN, err)
-		return nil, nil, errRet
+		if isNetworkError(err) {
+			return nil, nil, fmt.Errorf("LDAP bind for DN %s failed: %w", lookupResult.ActualDN, err)
+		}
+		return nil, nil, fmt.Errorf("%w: LDAP auth failed for DN %s: %v", ErrInvalidCredentials, lookupResult.ActualDN, err)
 	}
 
 	// Bind to the lookup user account again to perform group search.

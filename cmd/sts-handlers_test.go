@@ -919,6 +919,8 @@ func (s *TestSuiteIAM) SetUpLDAP(c *check, serverAddr string) {
 	}
 
 	s.RestartIAMSuite(c)
+	// Suites share the process-wide login throttle; start each one clean.
+	globalLDAPLoginThrottle.resetForTest(time.Now)
 }
 
 // SetUpLDAPWithNonNormalizedBaseDN - expects to setup an LDAP test server using
@@ -949,6 +951,7 @@ func (s *TestSuiteIAM) SetUpLDAPWithNonNormalizedBaseDN(c *check, serverAddr str
 	}
 
 	s.RestartIAMSuite(c)
+	globalLDAPLoginThrottle.resetForTest(time.Now)
 }
 
 const (

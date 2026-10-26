@@ -260,6 +260,18 @@ func (driver *ftpDriver) ListDir(ctx *ftp.Context, objPath string, callback func
 	return nil
 }
 
+// ftpCheckLDAPPasswd authenticates an FTP login against LDAP, subject to the
+// LDAP login throttle for the client's address.
+func ftpCheckLDAPPasswd(username, password, remoteAddr string) (bool, error) {
+	lookupRes, groupDistNames, attempt, err := ldapThrottledBind(username, password, ldapThrottleSourceOfAddr(remoteAddr))
+	if err != nil {
+		return false, err
+	}
+	attempt.succeeded()
+	ldapPolicies, _ := globalIAMSys.PolicyDBGet(lookupRes.NormDN, groupDistNames...)
+	return len(ldapPolicies) > 0, nil
+}
+
 func (driver *ftpDriver) CheckPasswd(c *ftp.Context, username, password string) (ok bool, err error) {
 	stopFn := globalFtpMetrics.log(c, username)
 	defer stopFn(0, err)
@@ -270,12 +282,11 @@ func (driver *ftpDriver) CheckPasswd(c *ftp.Context, username, password string) 
 			return false, err
 		}
 		if errors.Is(err, errNoSuchServiceAccount) {
-			lookupRes, groupDistNames, err := globalIAMSys.LDAPConfig.Bind(username, password)
-			if err != nil {
-				return false, err
+			var remoteAddr string
+			if c != nil && c.Sess != nil {
+				remoteAddr = c.Sess.RemoteAddr().String()
 			}
-			ldapPolicies, _ := globalIAMSys.PolicyDBGet(lookupRes.NormDN, groupDistNames...)
-			return len(ldapPolicies) > 0, nil
+			return ftpCheckLDAPPasswd(username, password, remoteAddr)
 		}
 		return subtle.ConstantTimeCompare([]byte(sa.Credentials.SecretKey), []byte(password)) == 1, nil
 	}

@@ -33,6 +33,7 @@ import (
 
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
+	cfgldap "github.com/minio/minio/internal/config/identity/ldap"
 	"github.com/minio/minio/internal/config/identity/openid"
 	"github.com/minio/minio/internal/hash/sha256"
 	xhttp "github.com/minio/minio/internal/http"
@@ -645,6 +646,24 @@ func (sts *stsAPIHandlers) AssumeRoleWithClientGrants(w http.ResponseWriter, r *
 	sts.AssumeRoleWithSSO(w, r)
 }
 
+// errLDAPNotConfigured matches the error minio/pkg returns when LDAP is not
+// configured.
+var errLDAPNotConfigured = errors.New("LDAP is not configured")
+
+// ldapEnabledFn reports whether LDAP is configured; it is a variable so that
+// tests can run without an LDAP server.
+var ldapEnabledFn = func() bool {
+	return globalIAMSys.LDAPConfig.Enabled()
+}
+
+// writeLDAPAccessDenied logs why an LDAP login was refused and writes the
+// same generic response for every reason (unknown user, wrong password,
+// throttled, no policy) so that clients cannot enumerate users.
+func writeLDAPAccessDenied(ctx context.Context, w http.ResponseWriter, reason error) {
+	stsLogIf(ctx, reason, logger.WarningKind)
+	writeSTSErrorResponse(ctx, w, ErrSTSAccessDenied, nil)
+}
+
 // AssumeRoleWithLDAPIdentity - implements user auth against LDAP server
 func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "AssumeRoleWithLDAPIdentity")
@@ -690,10 +709,25 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 		return
 	}
 
-	lookupResult, groupDistNames, err := globalIAMSys.LDAPConfig.Bind(ldapUsername, ldapPassword)
+	if !ldapEnabledFn() {
+		// Same response as before throttling was added; this does not
+		// depend on the user.
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue,
+			fmt.Errorf("LDAP server error: %w", errLDAPNotConfigured))
+		return
+	}
+
+	// Throttle attempts before contacting the LDAP server. Rejected,
+	// unknown-user and throttled attempts all get the same generic
+	// response; details are only logged.
+	lookupResult, groupDistNames, attempt, err := ldapThrottledBind(ldapUsername, ldapPassword, ldapThrottleSourceOf(r))
 	if err != nil {
-		err = fmt.Errorf("LDAP server error: %w", err)
-		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, err)
+		if errors.Is(err, cfgldap.ErrInvalidCredentials) {
+			writeLDAPAccessDenied(ctx, w, err)
+			return
+		}
+		stsLogIf(ctx, fmt.Errorf("LDAP server error: %w", err))
+		writeSTSErrorResponse(ctx, w, ErrSTSUpstreamError, nil)
 		return
 	}
 	ldapUserDN := lookupResult.NormDN
@@ -702,15 +736,17 @@ func (sts *stsAPIHandlers) AssumeRoleWithLDAPIdentity(w http.ResponseWriter, r *
 	// Check if this user or their groups have a policy applied.
 	ldapPolicies, err := globalIAMSys.PolicyDBGet(ldapUserDN, groupDistNames...)
 	if err != nil {
+		attempt.notCredentialFailure()
 		writeSTSErrorResponse(ctx, w, ErrSTSInternalError, err)
 		return
 	}
 	if len(ldapPolicies) == 0 && newGlobalAuthZPluginFn() == nil {
-		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue,
+		writeLDAPAccessDenied(ctx, w,
 			fmt.Errorf("expecting a policy to be set for user `%s` or one of their groups: `%s` - rejecting this request",
 				ldapActualUserDN, strings.Join(groupDistNames, "`,`")))
 		return
 	}
+	attempt.succeeded()
 
 	expiryDur, err := globalIAMSys.LDAPConfig.GetExpiryDuration(r.Form.Get(stsDurationSeconds))
 	if err != nil {
