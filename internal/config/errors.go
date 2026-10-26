@@ -209,7 +209,7 @@ Examples:
 
 	ErrUnexpectedError = newErrFn(
 		"Unexpected error",
-		"Please contact MinIO at https://slack.min.io",
+		"Please report this at https://github.com/boson-science/minio/issues",
 		"",
 	)
 

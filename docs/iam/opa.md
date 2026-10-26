@@ -1,4 +1,4 @@
-# OPA Quickstart Guide [![Slack](https://slack.minio.io/slack?type=svg)](https://slack.minio.io)
+# OPA Quickstart Guide
 
 OPA is a lightweight general-purpose policy engine that can be co-located with MinIO server, in this document we talk about how to use OPA HTTP API to authorize requests. It can be used with any type of credentials (STS based like OpenID or LDAP, regular IAM users or service accounts).
 

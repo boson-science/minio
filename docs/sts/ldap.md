@@ -1,4 +1,4 @@
-# AssumeRoleWithLDAPIdentity [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
+# AssumeRoleWithLDAPIdentity
 
 ## Introduction
 
@@ -182,7 +182,6 @@ mc idp ldap policy detach myminio mypolicy --user='uid=james,cn=accounts,dc=myld
 mc idp ldap policy detach myminio mypolicy ----group='cn=projectx,ou=groups,ou=hwengg,dc=min,dc=io'
 ```
 
-
 Note that the commands above attempt to validate if the given entity (user or group) exist in the LDAP directory and return an error if they are not found.
 
 <details><summary> View **DEPRECATED** older policy association commands</summary>
@@ -192,7 +191,6 @@ Please **do not use** these as they may be removed or their behavior may change.
 ```sh
 mc admin policy attach myminio mypolicy --user='uid=james,cn=accounts,dc=myldapserver,dc=com'
 ```
-
 
 ```sh
 mc admin policy attach myminio mypolicy --group='cn=projectx,ou=groups,ou=hwengg,dc=min,dc=io'
@@ -303,7 +301,7 @@ export MINIO_IDENTITY_LDAP_GROUP_SEARCH_FILTER='(&(objectclass=groupOfNames)(mem
 minio server ~/test
 ```
 
-You can make sure it works appropriately using our [example program](https://raw.githubusercontent.com/minio/minio/master/docs/sts/ldap.go):
+You can make sure it works appropriately using our [example program](ldap.go):
 
 ```
 $ go run ldap.go -u foouser -p foopassword

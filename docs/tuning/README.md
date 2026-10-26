@@ -11,7 +11,7 @@ Please make sure the following packages are already installed via `dnf` or `apt`
 
 #### Step 1 - download `tuned.conf` from the referenced link
 ```
-wget https://raw.githubusercontent.com/minio/minio/master/docs/tuning/tuned.conf
+wget https://raw.githubusercontent.com/boson-science/minio/master/docs/tuning/tuned.conf
 ```
 
 #### Step 2 - install tuned.conf as supported performance profile on all nodes

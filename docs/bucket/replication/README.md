@@ -1,4 +1,4 @@
-# Bucket Replication Guide [![slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# Bucket Replication Guide
 
 Bucket replication is designed to replicate selected objects in a bucket to a destination bucket.
 
@@ -161,9 +161,9 @@ Replication status can be seen in the metadata on the source and destination obj
 
 To perform bi-directional replication, repeat the above process on the target site - this time setting the source bucket as the replication target. It is recommended that replication be run in a system with at least two CPU's available to the process, so that replication can run in its own thread.
 
-![put](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/replication/PUT_bucket_replication.png)
+![put](PUT_bucket_replication.png)
 
-![head](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/replication/HEAD_bucket_replication.png)
+![head](HEAD_bucket_replication.png)
 
 ## Replica Modification sync
 
@@ -210,7 +210,7 @@ Also note that `mc` version `RELEASE.2021-09-02T09-21-27Z` or older supports onl
 
 Status of delete marker replication can be viewed by doing a GET/HEAD on the object version - it will return a `X-Minio-Replication-DeleteMarker-Status` header and http response code of `405`. In the case of permanent deletes, if the delete replication is pending or failed to propagate to the target cluster, GET/HEAD will return additional `X-Minio-Replication-Delete-Status` header and a http response code of `405`.
 
-![delete](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/replication/DELETE_bucket_replication.png)
+![delete](DELETE_bucket_replication.png)
 
 The status of replication can be monitored by configuring event notifications on the source and target buckets using `mc event add`.On the source side, the `s3:PutObject`, `s3:Replication:OperationCompletedReplication` and `s3:Replication:OperationFailedReplication` events show the status of replication in the `X-Amz-Replication-Status` metadata.
 

@@ -117,4 +117,4 @@ To verify the above sample alert follow below steps
 }
 ```
 
-![Prometheus](https://raw.githubusercontent.com/minio/minio/master/docs/metrics/prometheus/minio-es-tolerance-alert.png)
+![Prometheus](minio-es-tolerance-alert.png)

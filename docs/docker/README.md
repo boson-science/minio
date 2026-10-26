@@ -1,4 +1,4 @@
-# MinIO Docker Quickstart Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# MinIO Docker Quickstart Guide
 
 See our web documentation on [Deploying MinIO in Standalone Mode](Deploy Standalone MinIO in a Container) for a more structured tutorial on deploying MinIO in a container.
 
@@ -116,7 +116,7 @@ docker run \
 
 #### Windows (regular user)
 
-On windows you would need to use [Docker integrated windows authentication](https://success.docker.com/article/modernizing-traditional-dot-net-applications#integratedwindowsauthentication) and [Create a container with Active Directory Support](https://blogs.msdn.microsoft.com/containerstuff/2017/01/30/create-a-container-with-active-directory-support/)
+On windows you would need to use [Group Managed Service Accounts for Windows containers](https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/manage-serviceaccounts) and [Create a container with Active Directory Support](https://blogs.msdn.microsoft.com/containerstuff/2017/01/30/create-a-container-with-active-directory-support/)
 
 > NOTE: make sure your AD/Windows user has write permissions to *D:\data* prior to using `credentialspec=`.
 

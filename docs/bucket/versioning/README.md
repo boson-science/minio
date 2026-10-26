@@ -1,4 +1,4 @@
-# Bucket Versioning Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/minio.svg?maxAge=604800)](https://hub.docker.com/r/minio/minio/)
+# Bucket Versioning Guide
 
 MinIO versioning is designed to keep multiple versions of an object in one bucket. For example, you could store `spark.csv` (version `ede336f2`) and `spark.csv` (version `fae684da`) in a single bucket. Versioning protects you from unintended overwrites, deletions, protect objects with retention policies.
 
@@ -10,25 +10,25 @@ Only MinIO generates version IDs, and they can't be edited. Version IDs are simp
 
 When you PUT an object in a versioning-enabled bucket, the noncurrent version is not overwritten. The following figure shows that when a new version of `spark.csv` is PUT into a bucket that already contains an object with the same name, the original object (ID = `ede336f2`) remains in the bucket, MinIO generates a new version (ID = `fae684da`), and adds the newer version to the bucket.
 
-![put](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/versioning/versioning_PUT_versionEnabled.png)
+![put](versioning_PUT_versionEnabled.png)
 
 This protects against accidental overwrites or deletes of objects, allows previous versions to be retrieved.
 
 When you DELETE an object, all versions remain in the bucket and MinIO adds a delete marker, as shown below:
 
-![delete](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/versioning/versioning_DELETE_versionEnabled.png)
+![delete](versioning_DELETE_versionEnabled.png)
 
 Now the delete marker becomes the current version of the object. GET requests by default always retrieve the latest stored version. So performing a simple GET object request when the current version is a delete marker would return `404` `The specified key does not exist` as shown below:
 
-![get](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/versioning/versioning_GET_versionEnabled.png)
+![get](versioning_GET_versionEnabled.png)
 
 GET requests by specifying a version ID as shown below, you can retrieve the specific object version `fae684da`.
 
-![get_version_id](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/versioning/versioning_GET_versionEnabled_id.png)
+![get_version_id](versioning_GET_versionEnabled_id.png)
 
 To permanently delete an object you need to specify the version you want to delete, only the user with appropriate permissions can permanently delete a version.  As shown below DELETE request called with a specific version id permanently deletes an object from a bucket. Delete marker is not added for DELETE requests with version id.
 
-![delete_version_id](https://raw.githubusercontent.com/minio/minio/master/docs/bucket/versioning/versioning_DELETE_versionEnabled_id.png)
+![delete_version_id](versioning_DELETE_versionEnabled_id.png)
 
 ## Concepts
 

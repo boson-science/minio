@@ -1,4 +1,4 @@
-# Identity Management Plugin Guide [![Slack](https://slack.minio.io/slack?type=svg)](https://slack.minio.io)
+# Identity Management Plugin Guide
 
 ## Introduction
 
