@@ -3711,6 +3711,19 @@ func TestIAMWithMockOpenIDRejectsForgedTokens(t *testing.T) {
 		"client_secret=" + clientSecret,
 		"claim_name=policy",
 	}
+	// globalServerConfig outlives this suite and is read by the next test
+	// server's IAM initialization before it loads its own config. Remove the
+	// OpenID config and reload while the mock IdP is still up, otherwise
+	// later suites block waiting for OpenID to initialize. Deferred calls run
+	// in reverse order, so this runs before TearDownSuite and idp.Close.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+		defer cancel()
+		if _, err := suite.adm.DelConfigKV(ctx, "identity_openid"); err != nil {
+			c.Fatalf("unable to remove OpenID config: %v", err)
+		}
+		suite.RestartIAMSuite(c)
+	}()
 	if _, err := suite.adm.SetConfigKV(ctx, strings.Join(configCmds, " ")); err != nil {
 		c.Fatalf("unable to setup OpenID for tests: %v", err)
 	}
