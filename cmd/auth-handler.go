@@ -721,7 +721,6 @@ func isPutRetentionAllowed(bucketName, objectName string, retDays int, retDate t
 	return ErrAccessDenied
 }
 
-// isPutActionAllowed - check if PUT operation is allowed on the resource, this
 // authenticateUnsignedTrailer returns the identity of an unsigned-trailer
 // upload. The payload of such a request is unsigned, so the only proof of
 // identity is the SigV4 signature in the Authorization header. Without that
@@ -745,6 +744,7 @@ func authenticateUnsignedTrailer(r *http.Request, region string) (auth.Credentia
 	return getReqAccessKeyV4(r, region, serviceS3)
 }
 
+// isPutActionAllowed - check if PUT operation is allowed on the resource, this
 // call verifies bucket policies and IAM policies, supports multi user
 // checks etc.
 func isPutActionAllowed(ctx context.Context, atype authType, bucketName, objectName string, r *http.Request, action policy.Action) (s3Err APIErrorCode) {
