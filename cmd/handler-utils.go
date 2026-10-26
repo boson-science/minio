@@ -33,6 +33,7 @@ import (
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/mcontext"
+	"github.com/minio/mux"
 	xnet "github.com/minio/pkg/v3/net"
 	"github.com/minio/pkg/v3/policy"
 )
@@ -84,7 +85,6 @@ var supportedHeaders = []string{
 	xhttp.AmzStorageClass,
 	xhttp.AmzObjectTagging,
 	"expires",
-	xhttp.AmzBucketReplicationStatus,
 	// Add more supported headers here.
 }
 
@@ -227,6 +227,62 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 	return nil
 }
 
+// replicationOnlyHeaders are request headers through which a replication
+// source transfers the state of an object to its replica. Together with
+// replicationToInternalHeaders they are honoured only for principals that
+// are allowed to replicate, see replicationSafeHeader.
+var replicationOnlyHeaders = []string{
+	xhttp.MinIOSourceReplicationRequest,
+	xhttp.AmzBucketReplicationStatus,
+	xhttp.MinIOSourceETag,
+	xhttp.MinIOSourceMTime,
+	xhttp.MinIOSourceDeleteMarker,
+	xhttp.MinIOSourceDeleteMarkerDelete,
+	xhttp.MinIOSourceTaggingTimestamp,
+	xhttp.MinIOSourceObjectRetentionTimestamp,
+	xhttp.MinIOSourceObjectLegalHoldTimestamp,
+}
+
+// hasReplicationOnlyHeaders returns true if the header contains any
+// replication-only header.
+func hasReplicationOnlyHeaders(h http.Header) bool {
+	for _, k := range replicationOnlyHeaders {
+		if _, ok := h[http.CanonicalHeaderKey(k)]; ok {
+			return true
+		}
+	}
+	return hasReplicationMetadata(h)
+}
+
+// withoutReplicationOnlyHeaders returns a copy of h without any
+// replication-only headers.
+func withoutReplicationOnlyHeaders(h http.Header) http.Header {
+	h = h.Clone()
+	for _, k := range replicationOnlyHeaders {
+		h.Del(k)
+	}
+	for k := range replicationToInternalHeaders {
+		h.Del(k)
+	}
+	return h
+}
+
+// replicationSafeHeader returns the headers of r that may be honoured for
+// bucket/object. Replication-only headers are kept only if the requester
+// is allowed the replication action (s3:ReplicateObject or
+// s3:ReplicateDelete), otherwise a copy of r.Header without them is
+// returned. r.Header itself is never modified, it may be covered by the
+// request signature.
+func replicationSafeHeader(ctx context.Context, r *http.Request, bucket, object string, action policy.Action) http.Header {
+	if !hasReplicationOnlyHeaders(r.Header) {
+		return r.Header
+	}
+	if isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, action) == ErrNone {
+		return r.Header
+	}
+	return withoutReplicationOnlyHeaders(r.Header)
+}
+
 // hasReplicationMetadata returns true if the header contains any of the
 // replication-only metadata headers.
 func hasReplicationMetadata(h http.Header) bool {
@@ -303,7 +359,20 @@ func extractReqParams(r *http.Request) map[string]string {
 	}
 
 	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
-		m[xhttp.MinIOSourceReplicationRequest] = ""
+		// Suppresses event notifications, only honour it from replicators.
+		vars := mux.Vars(r)
+		bucket := vars["bucket"]
+		object, err := unescapePath(vars["object"])
+		if err != nil {
+			object = vars["object"]
+		}
+		action := policy.Action(policy.ReplicateObjectAction)
+		if r.Method == http.MethodDelete {
+			action = policy.ReplicateDeleteAction
+		}
+		if _, ok := replicationSafeHeader(r.Context(), r, bucket, object, action)[xhttp.MinIOSourceReplicationRequest]; ok {
+			m[xhttp.MinIOSourceReplicationRequest] = ""
+		}
 	}
 	return m
 }

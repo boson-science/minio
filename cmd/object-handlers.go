@@ -1178,6 +1178,16 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Creating a replica requires s3:ReplicateObject, like PutObject.
+	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
+		if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), dstBucket, dstObject, r, policy.ReplicateObjectAction); s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	}
+	// replication-only headers are honoured only from replicators
+	replHdr := replicationSafeHeader(ctx, r, dstBucket, dstObject, policy.ReplicateObjectAction)
+
 	// Read escaped copy source path to check for parameters.
 	cpSrcPath := r.Header.Get(xhttp.AmzCopySource)
 	var vid string
@@ -1252,7 +1262,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		VersionID:          srcOpts.VersionID,
 		Versioned:          srcOpts.Versioned,
 		VersionSuspended:   srcOpts.VersionSuspended,
-		ReplicationRequest: r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true",
+		ReplicationRequest: replHdr.Get(xhttp.MinIOSourceReplicationRequest) == "true",
 	}
 	getSSE := encrypt.SSE(srcOpts.ServerSideEncryption)
 	if getSSE != srcOpts.ServerSideEncryption {
@@ -1380,7 +1390,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Encryption parameters not present for this object.
-	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && r.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
+	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && replHdr.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidSSECustomerAlgorithm), r.URL)
 		return
 	}
@@ -1628,7 +1638,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
-	if rs := r.Header.Get(xhttp.AmzBucketReplicationStatus); rs != "" {
+	if rs := replHdr.Get(xhttp.AmzBucketReplicationStatus); rs != "" {
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		srcInfo.UserDefined[xhttp.AmzBucketReplicationStatus] = rs
@@ -1943,6 +1953,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
+		metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		defer globalReplicationStats.Load().UpdateReplicaStat(bucket, size)
@@ -2402,6 +2413,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
 				return errors.New(errorCodes.ToAPIErr(s3Err).Code)
 			}
+			metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 		}
@@ -2428,9 +2440,13 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 				return err
 			}
 			maps.Copy(metadata, m)
+			// replication-only PAX records are honoured only from replicators
+			if hasReplicationOnlyHeaders(hdrs) && isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction) != ErrNone {
+				hdrs = withoutReplicationOnlyHeaders(hdrs)
+			}
 		} else {
 			versionID = r.Form.Get(xhttp.VersionID)
-			hdrs = r.Header
+			hdrs = replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
 		}
 
 		opts, err := putOpts(ctx, bucket, object, versionID, hdrs, metadata)

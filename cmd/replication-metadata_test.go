@@ -21,6 +21,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
 	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/mux"
 )
 
 // replicationMetadataTestHeaders returns the replication-only metadata
@@ -157,6 +159,55 @@ func TestContainsReservedMetadataInternalSSEKeys(t *testing.T) {
 	}
 }
 
+// replTestUser creates an IAM user with a policy allowing actions on the
+// objects of the given buckets.
+func replTestUser(ctx context.Context, c *check, s *TestSuiteIAM, name string, buckets []string, actions ...string) madmin.Credentials {
+	c.Helper()
+	resources := make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		resources = append(resources, "arn:aws:s3:::"+b+"/*")
+	}
+	pol := map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []map[string]any{{
+			"Effect":   "Allow",
+			"Action":   actions,
+			"Resource": resources,
+		}},
+	}
+	polBytes, err := json.Marshal(pol)
+	if err != nil {
+		c.Fatal(err)
+	}
+	if err = s.adm.AddCannedPolicy(ctx, name, polBytes); err != nil {
+		c.Fatalf("policy add error: %v", err)
+	}
+	cred := c.mustCreateIAMUser(ctx, s.adm)
+	if _, err = s.adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{Policies: []string{name}, User: cred.AccessKey}); err != nil {
+		c.Fatalf("unable to attach policy: %v", err)
+	}
+	return cred
+}
+
+// replTestDo sends a V4 signed request and returns the response and its body.
+func replTestDo(c *check, s *TestSuiteIAM, cred madmin.Credentials, method, urlStr string, body []byte, hdrs map[string]string) (*http.Response, []byte) {
+	c.Helper()
+	req, err := newTestSignedRequestV4(method, urlStr, int64(len(body)), bytes.NewReader(body), cred.AccessKey, cred.SecretKey, hdrs)
+	if err != nil {
+		c.Fatal(err)
+	}
+	resp, err := s.TestSuiteCommon.client.Do(req)
+	if err != nil {
+		c.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.Fatal(err)
+	}
+	return resp, respBody
+}
+
 // TestReplicationMetadataInjection verifies that replication-only SSE, size
 // and checksum metadata cannot be injected by principals that are not
 // allowed to replicate objects (GHSA-3rh2-v3gr-35p9).
@@ -174,47 +225,12 @@ func TestReplicationMetadataInjection(t *testing.T) {
 		c.Fatalf("bucket create error: %v", err)
 	}
 
-	mkUser := func(name string, actions ...string) madmin.Credentials {
-		pol := map[string]any{
-			"Version": "2012-10-17",
-			"Statement": []map[string]any{{
-				"Effect":   "Allow",
-				"Action":   actions,
-				"Resource": []string{"arn:aws:s3:::" + bucket + "/*"},
-			}},
-		}
-		polBytes, err := json.Marshal(pol)
-		if err != nil {
-			c.Fatal(err)
-		}
-		if err = s.adm.AddCannedPolicy(ctx, name, polBytes); err != nil {
-			c.Fatalf("policy add error: %v", err)
-		}
-		cred := c.mustCreateIAMUser(ctx, s.adm)
-		if _, err = s.adm.AttachPolicy(ctx, madmin.PolicyAssociationReq{Policies: []string{name}, User: cred.AccessKey}); err != nil {
-			c.Fatalf("unable to attach policy: %v", err)
-		}
-		return cred
-	}
-	user := mkUser("replmeta-putget", "s3:PutObject", "s3:GetObject")
-	replicator := mkUser("replmeta-replicator", "s3:PutObject", "s3:GetObject", "s3:ReplicateObject")
+	user := replTestUser(ctx, c, s, "replmeta-putget", []string{bucket}, "s3:PutObject", "s3:GetObject")
+	replicator := replTestUser(ctx, c, s, "replmeta-replicator", []string{bucket}, "s3:PutObject", "s3:GetObject", "s3:ReplicateObject")
 
 	do := func(cred madmin.Credentials, method, urlStr string, body []byte, hdrs map[string]string) (*http.Response, []byte) {
 		c.Helper()
-		req, err := newTestSignedRequestV4(method, urlStr, int64(len(body)), bytes.NewReader(body), cred.AccessKey, cred.SecretKey, hdrs)
-		if err != nil {
-			c.Fatal(err)
-		}
-		resp, err := s.TestSuiteCommon.client.Do(req)
-		if err != nil {
-			c.Fatal(err)
-		}
-		defer resp.Body.Close()
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			c.Fatal(err)
-		}
-		return resp, respBody
+		return replTestDo(c, s, cred, method, urlStr, body, hdrs)
 	}
 	objURL := func(object string, q url.Values) string {
 		return makeTestTargetURL(s.endPoint, bucket, object, q)
@@ -463,5 +479,250 @@ func TestReplicationMetadataInjection(t *testing.T) {
 	}
 	if got := oi.UserDefined[ReservedMetadataPrefix+"actual-size"]; got != "12345" {
 		c.Fatal(fmt.Sprintf("replicator CompleteMultipartUpload: want actual size 12345, got %q", got))
+	}
+}
+
+// TestReplicationHeadersRequirePermission verifies that replication-only
+// request headers (X-Minio-Source-Replication-Request, replication status,
+// source ETag/mtime and friends) are honoured only for principals allowed
+// to replicate.
+func TestReplicationHeadersRequirePermission(t *testing.T) {
+	// SSE-C requires TLS.
+	defer func(isTLS bool) { globalIsTLS = isTLS }(globalIsTLS)
+	globalIsTLS = true
+	s := newTestSuiteIAM(TestSuiteCommon{serverType: "ErasureSD", signer: signerV4}, false)
+	c := &check{t, s.serverType}
+	s.SetUpSuite(c)
+	defer s.TearDownSuite(c)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*testDefaultTimeout)
+	defer cancel()
+
+	bucket := getRandomBucketName()
+	if err := s.client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		c.Fatalf("bucket create error: %v", err)
+	}
+	lockBucket := getRandomBucketName()
+	if err := s.client.MakeBucket(ctx, lockBucket, minio.MakeBucketOptions{ObjectLocking: true}); err != nil {
+		c.Fatalf("bucket create error: %v", err)
+	}
+	buckets := []string{bucket, lockBucket}
+	user := replTestUser(ctx, c, s, "replhdr-user", buckets,
+		"s3:PutObject", "s3:GetObject", "s3:PutObjectRetention")
+	replicator := replTestUser(ctx, c, s, "replhdr-replicator", buckets,
+		"s3:PutObject", "s3:GetObject", "s3:PutObjectRetention", "s3:ReplicateObject", "s3:ReplicateDelete")
+
+	do := func(cred madmin.Credentials, method, urlStr string, body []byte, hdrs map[string]string) (*http.Response, []byte) {
+		c.Helper()
+		return replTestDo(c, s, cred, method, urlStr, body, hdrs)
+	}
+	objURL := func(b, object string, q url.Values) string {
+		return makeTestTargetURL(s.endPoint, b, object, q)
+	}
+	expectStatus := func(what string, resp *http.Response, body []byte, want int) {
+		c.Helper()
+		if resp.StatusCode != want {
+			c.Fatalf("%s: want status %d, got %d: %s", what, want, resp.StatusCode, body)
+		}
+	}
+	merge := func(ms ...map[string]string) map[string]string {
+		out := map[string]string{}
+		for _, m := range ms {
+			for k, v := range m {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	data := make([]byte, 1024)
+	rand.Read(data)
+	sourceRepl := map[string]string{xhttp.MinIOSourceReplicationRequest: "true"}
+
+	// 1. Source ETag and mtime are preserved only for replicators.
+	const srcETag = "0123456789abcdef0123456789abcdef"
+	srcMTime := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
+	preserve := merge(sourceRepl, map[string]string{
+		xhttp.MinIOSourceETag:  srcETag,
+		xhttp.MinIOSourceMTime: srcMTime.Format(time.RFC3339Nano),
+	})
+	for _, tc := range []struct {
+		cred     madmin.Credentials
+		object   string
+		preserve bool
+	}{
+		{user, "preserve-user", false},
+		{replicator, "preserve-replicator", true},
+	} {
+		resp, body := do(tc.cred, http.MethodPut, objURL(bucket, tc.object, nil), data, preserve)
+		expectStatus("PutObject "+tc.object, resp, body, http.StatusOK)
+		oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, tc.object, ObjectOptions{})
+		if err != nil {
+			c.Fatal(err)
+		}
+		if got := oi.ETag == srcETag; got != tc.preserve {
+			c.Fatalf("%s: ETag %q, want preserved=%v", tc.object, oi.ETag, tc.preserve)
+		}
+		if got := oi.ModTime.Equal(srcMTime); got != tc.preserve {
+			c.Fatalf("%s: mtime %v, want preserved=%v", tc.object, oi.ModTime, tc.preserve)
+		}
+	}
+
+	// 2. Past retain-until dates are accepted only from replicators.
+	pastRetention := merge(sourceRepl, map[string]string{
+		xhttp.AmzObjectLockMode:            "GOVERNANCE",
+		xhttp.AmzObjectLockRetainUntilDate: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	resp, body := do(user, http.MethodPut, objURL(lockBucket, "retention", nil), data, pastRetention)
+	expectStatus("PutObject past retention by user", resp, body, http.StatusBadRequest)
+	resp, body = do(replicator, http.MethodPut, objURL(lockBucket, "retention", nil), data, pastRetention)
+	expectStatus("PutObject past retention by replicator", resp, body, http.StatusOK)
+
+	// 3. Requests are treated as replication requests (no re-replication,
+	//    no event notification) only for replicators.
+	for _, tc := range []struct {
+		cred madmin.Credentials
+		want bool
+	}{{user, false}, {replicator, true}} {
+		object := "opts"
+		req, err := newTestSignedRequestV4(http.MethodPut, objURL(bucket, object, nil), 0, nil, tc.cred.AccessKey, tc.cred.SecretKey, sourceRepl)
+		if err != nil {
+			c.Fatal(err)
+		}
+		req = mux.SetURLVars(req, map[string]string{"bucket": bucket, "object": object})
+		popts, err := putOptsFromReq(ctx, req, bucket, object, map[string]string{})
+		if err != nil {
+			c.Fatal(err)
+		}
+		gopts, err := getOpts(ctx, req, bucket, object)
+		if err != nil {
+			c.Fatal(err)
+		}
+		_, evtSuppressed := extractReqParams(req)[xhttp.MinIOSourceReplicationRequest]
+		if popts.ReplicationRequest != tc.want || gopts.ReplicationRequest != tc.want || evtSuppressed != tc.want {
+			c.Fatalf("%s: replication request put=%v get=%v event=%v, want %v", tc.cred.AccessKey,
+				popts.ReplicationRequest, gopts.ReplicationRequest, evtSuppressed, tc.want)
+		}
+
+		dreq, err := newTestSignedRequestV4(http.MethodDelete, objURL(bucket, object, nil), 0, nil, tc.cred.AccessKey, tc.cred.SecretKey,
+			merge(sourceRepl, map[string]string{xhttp.MinIOSourceDeleteMarker: "true"}))
+		if err != nil {
+			c.Fatal(err)
+		}
+		dopts, err := delOpts(ctx, dreq, bucket, object)
+		if err != nil {
+			c.Fatal(err)
+		}
+		if dopts.ReplicationRequest != tc.want || dopts.DeleteMarker != tc.want {
+			c.Fatalf("%s: delete replication request=%v delete marker=%v, want %v", tc.cred.AccessKey,
+				dopts.ReplicationRequest, dopts.DeleteMarker, tc.want)
+		}
+	}
+
+	// 4. Replication status is never taken from query parameters and
+	//    stored only for replicators.
+	resp, body = do(user, http.MethodPut, objURL(bucket, "status-query", url.Values{xhttp.AmzBucketReplicationStatus: {"REPLICA"}}), data, nil)
+	expectStatus("PutObject status query", resp, body, http.StatusOK)
+	resp, body = do(user, http.MethodPut, objURL(bucket, "status-header", nil), data, map[string]string{xhttp.AmzBucketReplicationStatus: "COMPLETED"})
+	expectStatus("PutObject status header", resp, body, http.StatusOK)
+	resp, body = do(user, http.MethodPut, objURL(bucket, "status-copy", nil), nil, map[string]string{
+		xhttp.AmzCopySource:              "/" + bucket + "/status-header",
+		xhttp.AmzBucketReplicationStatus: "COMPLETED",
+	})
+	expectStatus("CopyObject status", resp, body, http.StatusOK)
+	for _, object := range []string{"status-query", "status-header", "status-copy"} {
+		oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, object, ObjectOptions{})
+		if err != nil {
+			c.Fatal(err)
+		}
+		if v, ok := oi.UserDefined[xhttp.AmzBucketReplicationStatus]; ok {
+			c.Fatalf("%s: replication status %q stored", object, v)
+		}
+		if v, ok := oi.UserDefined[ReservedMetadataPrefixLower+ReplicaStatus]; ok {
+			c.Fatalf("%s: replica status %q stored", object, v)
+		}
+		if !oi.ReplicationStatus.Empty() {
+			c.Fatalf("%s: replication status %q reported", object, oi.ReplicationStatus)
+		}
+	}
+	resp, body = do(user, http.MethodPut, objURL(bucket, "status-copy-replica", nil), nil, map[string]string{
+		xhttp.AmzCopySource:              "/" + bucket + "/status-header",
+		xhttp.AmzBucketReplicationStatus: "REPLICA",
+	})
+	expectStatus("CopyObject REPLICA by user", resp, body, http.StatusForbidden)
+	resp, body = do(replicator, http.MethodPut, objURL(bucket, "status-replica", nil), data, merge(sourceRepl, map[string]string{
+		xhttp.AmzBucketReplicationStatus: "REPLICA",
+	}))
+	expectStatus("PutObject REPLICA by replicator", resp, body, http.StatusOK)
+	resp, body = do(user, http.MethodHead, objURL(bucket, "status-replica", nil), nil, nil)
+	expectStatus("HEAD replica", resp, body, http.StatusOK)
+	if got := resp.Header.Get(xhttp.AmzBucketReplicationStatus); got != "REPLICA" {
+		c.Fatalf("replica: want replication status REPLICA, got %q", got)
+	}
+
+	// SSE-C request headers
+	ssecKey := make([]byte, 32)
+	rand.Read(ssecKey)
+	keyMD5 := md5.Sum(ssecKey)
+	ssec := map[string]string{
+		xhttp.AmzServerSideEncryptionCustomerAlgorithm: "AES256",
+		xhttp.AmzServerSideEncryptionCustomerKey:       base64.StdEncoding.EncodeToString(ssecKey),
+		xhttp.AmzServerSideEncryptionCustomerKeyMD5:    base64.StdEncoding.EncodeToString(keyMD5[:]),
+	}
+
+	// 5. SSE-C parts are encrypted unless uploaded by a replicator.
+	{
+		object := "ssec-mp"
+		resp, body = do(user, http.MethodPost, objURL(bucket, object, url.Values{"uploads": {""}}), nil, ssec)
+		expectStatus("NewMultipartUpload SSE-C", resp, body, http.StatusOK)
+		var ir struct {
+			UploadID string `xml:"UploadId"`
+		}
+		if err := xml.Unmarshal(body, &ir); err != nil {
+			c.Fatal(err)
+		}
+		resp, body = do(user, http.MethodPut, objURL(bucket, object, url.Values{"uploadId": {ir.UploadID}, "partNumber": {"1"}}), data, merge(ssec, sourceRepl))
+		expectStatus("PutObjectPart SSE-C with replication header", resp, body, http.StatusOK)
+		cmu := CompleteMultipartUpload{Parts: []CompletePart{{PartNumber: 1, ETag: resp.Header.Get(xhttp.ETag)}}}
+		cbody, err := xml.Marshal(cmu)
+		if err != nil {
+			c.Fatal(err)
+		}
+		resp, body = do(user, http.MethodPost, objURL(bucket, object, url.Values{"uploadId": {ir.UploadID}}), cbody, ssec)
+		expectStatus("CompleteMultipartUpload SSE-C", resp, body, http.StatusOK)
+		resp, body = do(user, http.MethodGet, objURL(bucket, object, nil), nil, ssec)
+		expectStatus("GET SSE-C multipart", resp, body, http.StatusOK)
+		if !bytes.Equal(body, data) {
+			c.Fatal("GET SSE-C multipart: content mismatch")
+		}
+	}
+
+	// 6. SSE-C objects are not readable or copyable without the key,
+	//    except raw access by replicators.
+	resp, body = do(user, http.MethodPut, objURL(bucket, "ssec", nil), data, ssec)
+	expectStatus("PutObject SSE-C", resp, body, http.StatusOK)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		resp, body = do(user, method, objURL(bucket, "ssec", nil), nil, sourceRepl)
+		expectStatus(method+" SSE-C without key by user", resp, body, http.StatusBadRequest)
+	}
+	resp, body = do(user, http.MethodPut, objURL(bucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
+		xhttp.AmzCopySource: "/" + bucket + "/ssec",
+	}))
+	expectStatus("CopyObject SSE-C without key by user", resp, body, http.StatusBadRequest)
+	oi, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "ssec", ObjectOptions{})
+	if err != nil {
+		c.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cred    madmin.Credentials
+		wantErr error
+	}{{user, errEncryptedObject}, {replicator, nil}} {
+		req, err := newTestSignedRequestV4(http.MethodGet, objURL(bucket, "ssec", nil), 0, nil, tc.cred.AccessKey, tc.cred.SecretKey, sourceRepl)
+		if err != nil {
+			c.Fatal(err)
+		}
+		info := oi.Clone()
+		if _, err = DecryptObjectInfo(&info, req); err != tc.wantErr {
+			c.Fatalf("%s: DecryptObjectInfo without key: want %v, got %v", tc.cred.AccessKey, tc.wantErr, err)
+		}
 	}
 }

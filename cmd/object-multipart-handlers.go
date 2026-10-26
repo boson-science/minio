@@ -173,6 +173,7 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
+		metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
 	}
@@ -800,7 +801,8 @@ func (api objectAPIHandlers) PutObjectPartHandler(w http.ResponseWriter, r *http
 
 	_, isEncrypted := crypto.IsEncrypted(mi.UserDefined)
 	_, replicationStatus := mi.UserDefined[xhttp.AmzBucketReplicationStatus]
-	_, sourceReplReq := r.Header[xhttp.MinIOSourceReplicationRequest]
+	// only replicators may upload SSE-C parts without the key
+	_, sourceReplReq := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)[xhttp.MinIOSourceReplicationRequest]
 	var objectEncryptionKey crypto.ObjectKey
 	if isEncrypted {
 		if !crypto.SSEC.IsRequested(r.Header) && crypto.SSEC.IsEncrypted(mi.UserDefined) && !replicationStatus {
@@ -1071,7 +1073,7 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 	if dsc := mustReplicate(ctx, bucket, object, objInfo.getMustReplicateOptions(replication.ObjectReplicationType, opts)); dsc.ReplicateAny() {
 		scheduleReplication(ctx, objInfo, objectAPI, dsc, replication.ObjectReplicationType)
 	}
-	if _, ok := r.Header[xhttp.MinIOSourceReplicationRequest]; ok {
+	if opts.ReplicationRequest {
 		actualSize, _ := objInfo.GetActualSize()
 		defer globalReplicationStats.Load().UpdateReplicaStat(bucket, actualSize)
 	}
