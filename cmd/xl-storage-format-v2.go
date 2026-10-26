@@ -1318,6 +1318,9 @@ func (x *xlMetaV2) getDataDirs() ([]string, error) {
 			if obj.ObjectV1 == nil {
 				return nil, errors.New("obj.ObjectV1 unexpectedly nil")
 			}
+			if !isValidLegacyDataDir(obj.ObjectV1.DataDir) {
+				return nil, errFileCorrupt
+			}
 			dds = append(dds, obj.ObjectV1.DataDir)
 		}
 	}
@@ -1420,6 +1423,9 @@ func (x *xlMetaV2) DeleteVersion(fi FileInfo) (string, error) {
 			ver, err := x.getIdx(i)
 			if err != nil {
 				return "", err
+			}
+			if ver.ObjectV1 == nil || !isValidLegacyDataDir(ver.ObjectV1.DataDir) {
+				return "", errFileCorrupt
 			}
 			x.versions = append(x.versions[:i], x.versions[i+1:]...)
 			if fi.Deleted {

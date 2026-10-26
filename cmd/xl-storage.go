@@ -559,6 +559,13 @@ func (s *xlStorage) NSScanner(ctx context.Context, cache dataUsageCache, updates
 
 	// Updates must be closed before we return.
 	defer xioutil.SafeClose(updates)
+
+	// The cache, including its name, may be supplied by a remote caller;
+	// the name is joined directly onto the drive path by the scanner.
+	if err = checkPathComponents(cache.Info.Name); err != nil {
+		return cache, err
+	}
+
 	var lc *lifecycle.Lifecycle
 
 	// Check if the current bucket has a configured lifecycle policy
@@ -1182,6 +1189,9 @@ func (s *xlStorage) deleteVersions(ctx context.Context, volume, path string, fis
 			// due to a CopyObject() bug where it might have
 			// inlined the data incorrectly, to avoid a situation
 			// where we potentially leave "DataDir"
+			if err = checkPathComponents(dataDir); err != nil {
+				return err
+			}
 			filePath := pathJoin(volumeDir, path, dataDir)
 			if err = checkPathLength(filePath); err != nil {
 				return err
@@ -1412,6 +1422,9 @@ func (s *xlStorage) DeleteVersion(ctx context.Context, volume, path string, fi F
 		// due to a CopyObject() bug where it might have
 		// inlined the data incorrectly, to avoid a situation
 		// where we potentially leave "DataDir"
+		if err = checkPathComponents(dataDir); err != nil {
+			return err
+		}
 		filePath := pathJoin(volumeDir, path, dataDir)
 		if err = checkPathLength(filePath); err != nil {
 			return err
@@ -1741,6 +1754,11 @@ func (s *xlStorage) ReadVersion(ctx context.Context, origvolume, volume, path, v
 	})
 	if err != nil {
 		return fi, err
+	}
+
+	// DataDir is read from disk and joined into paths below.
+	if err = checkPathComponents(fi.DataDir); err != nil {
+		return FileInfo{}, err
 	}
 
 	if len(fi.Data) == 0 {
