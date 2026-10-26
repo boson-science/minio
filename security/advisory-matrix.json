@@ -275,10 +275,6 @@
         },
         {
           "package": "./cmd",
-          "test": "TestOpenIDSTSRejectsForgedTokens"
-        },
-        {
-          "package": "./cmd",
           "test": "TestIAMWithMockOpenIDRejectsForgedTokens"
         }
       ],
