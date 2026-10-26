@@ -140,15 +140,41 @@ func (r *Reader) nextSplit(skip int, dst []byte) ([]byte, error) {
 		}
 	}
 	// Read until next line.
-	in, err := r.buf.ReadBytes('\n')
-	dst = append(dst, in...)
-	return dst, err
+	return readLine(r.buf, dst)
+}
+
+// readLine appends bytes from br to dst up to and including the next '\n'.
+// If the line, including any part of it already in dst, exceeds
+// maxRecordSize bytes, dst is truncated to its last complete line and
+// errOverMaxRecordSize is returned. Other errors from br are returned as-is.
+func readLine(br *bufio.Reader, dst []byte) ([]byte, error) {
+	lineStart := bytes.LastIndexByte(dst, '\n') + 1
+	n := len(dst) - lineStart
+	for {
+		b, err := br.ReadSlice('\n')
+		n += len(b)
+		recLen := n
+		if err == nil {
+			recLen-- // Do not count the newline.
+		}
+		if recLen > maxRecordSize {
+			return dst[:lineStart], errOverMaxRecordSize()
+		}
+		dst = append(dst, b...)
+		if err != bufio.ErrBufferFull {
+			return dst, err
+		}
+	}
 }
 
 // csvSplitSize is the size of each block.
 // Blocks will read this much and find the first following newline.
 // 128KB appears to be a very reasonable default.
 const csvSplitSize = 128 << 10
+
+// maxRecordSize is the maximum size of a single input record (line),
+// matching the S3 Select limit.
+const maxRecordSize = 1 << 20
 
 // startReaders will read the header if needed and spin up a parser
 // and a number of workers based on GOMAXPROCS.
@@ -189,6 +215,10 @@ func (r *Reader) startReaders(newReader func(io.Reader) *csv.Reader) error {
 
 	// Return first block
 	next, nextErr := r.nextSplit(csvSplitSize, r.bufferPool.Get())
+	if isOverMaxRecordSize(nextErr) {
+		r.err = nextErr
+		return nextErr
+	}
 	// Check if first block is valid.
 	if !utf8.Valid(next) {
 		return errInvalidTextEncodingError()

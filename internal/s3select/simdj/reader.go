@@ -18,6 +18,8 @@
 package simdj
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -48,6 +50,10 @@ func (r *Reader) Read(dst sql.Record) (sql.Record, error) {
 	v, ok := <-r.decoded
 	if !ok {
 		if r.err != nil && *r.err != nil {
+			var serr *s3Error
+			if errors.As(*r.err, &serr) {
+				return nil, serr
+			}
 			return nil, errJSONParsingError(*r.err)
 		}
 		return nil, io.EOF
@@ -170,7 +176,9 @@ func NewReader(readCloser io.ReadCloser, args *json.ReaderArgs) *Reader {
 	}
 
 	// We cannot reuse as we are sending parsed objects elsewhere.
-	simdjson.ParseNDStream(readCloser, r.input, nil)
+	// ParseNDStream reads until a newline without a limit,
+	// so bound the line length of its input.
+	simdjson.ParseNDStream(&lineLimitReader{r: readCloser}, r.input, nil)
 	r.readerWg.Add(1)
 	go r.startReader()
 	return &r
@@ -207,4 +215,35 @@ func (s *safeCloser) Read(p []byte) (n int, err error) {
 func (s *safeCloser) Close() error {
 	atomic.CompareAndSwapUint32(&s.closed, 0, 1)
 	return nil
+}
+
+// maxRecordSize is the maximum size of a single input record (line),
+// matching the S3 Select limit.
+const maxRecordSize = 1 << 20
+
+// lineLimitReader returns errOverMaxRecordSize once more than
+// maxRecordSize bytes are read without a newline.
+type lineLimitReader struct {
+	r       io.Reader
+	lineLen int // bytes read since the last newline
+}
+
+func (l *lineLimitReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	for b := p[:n]; len(b) > 0; {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			l.lineLen += len(b)
+			break
+		}
+		if l.lineLen+i > maxRecordSize {
+			return n, errOverMaxRecordSize()
+		}
+		l.lineLen = 0
+		b = b[i+1:]
+	}
+	if l.lineLen > maxRecordSize {
+		return n, errOverMaxRecordSize()
+	}
+	return n, err
 }
