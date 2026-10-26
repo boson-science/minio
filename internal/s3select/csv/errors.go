@@ -63,3 +63,17 @@ func errInvalidTextEncodingError() *s3Error {
 		cause:      errors.New("invalid utf8 encoding"),
 	}
 }
+
+func errOverMaxRecordSize() *s3Error {
+	return &s3Error{
+		code:       "OverMaxRecordSize",
+		message:    "The length of a record in the input or result is greater than maxCharsPerRecord of 1 MB.",
+		statusCode: 400,
+		cause:      errors.New("record exceeds maximum record size"),
+	}
+}
+
+func isOverMaxRecordSize(err error) bool {
+	var serr *s3Error
+	return errors.As(err, &serr) && serr.code == "OverMaxRecordSize"
+}
