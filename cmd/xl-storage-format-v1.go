@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -38,7 +39,19 @@ const (
 // format version and erasure coding information.
 func (m *xlMetaV1Object) valid() bool {
 	return isXLMetaFormatValid(m.Version, m.Format) &&
-		isXLMetaErasureInfoValid(m.Erasure.DataBlocks, m.Erasure.ParityBlocks)
+		isXLMetaErasureInfoValid(m.Erasure.DataBlocks, m.Erasure.ParityBlocks) &&
+		isValidLegacyDataDir(m.DataDir)
+}
+
+// isValidLegacyDataDir returns true if dataDir, as stored in legacy
+// metadata, is empty, legacyDataDir or a UUID. The value is read from
+// disk and joined into file paths, so it must be a single safe segment.
+func isValidLegacyDataDir(dataDir string) bool {
+	if dataDir == "" || dataDir == legacyDataDir {
+		return true
+	}
+	_, err := uuid.Parse(dataDir)
+	return err == nil && len(dataDir) == 36
 }
 
 // Verifies if the backend format metadata is sane by validating

@@ -77,6 +77,10 @@ func (s *xlStorage) WalkDir(ctx context.Context, opts WalkDirOptions, wr io.Writ
 	legacy := s.formatLegacy
 	s.RUnlock()
 
+	if err = checkPathComponents(opts.BaseDir); err != nil {
+		return err
+	}
+
 	// Verify if volume is valid and it exists.
 	volumeDir, err := s.getVolDir(opts.Bucket)
 	if err != nil {
