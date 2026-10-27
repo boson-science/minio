@@ -78,8 +78,8 @@ func TestNDJSON(t *testing.T) {
 				t.Fatal(err)
 			}
 			i := pj.Iter()
-			cpy := i
-			b, err := cpy.MarshalJSON()
+			iterCopy := i
+			b, err := iterCopy.MarshalJSON()
 			if err != nil {
 				t.Fatal(err)
 			}
