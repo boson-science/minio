@@ -14,7 +14,7 @@ permissions:
 jobs:
   iam-matrix-test:
     name: "[Go=${{ matrix.go-version }}|ldap=${{ matrix.ldap }}|etcd=${{ matrix.etcd }}|openid=${{ matrix.openid }}]"
-    runs-on: tau-minio
+    runs-on: ubuntu-latest
 
     services:
       openldap:
@@ -124,7 +124,7 @@ jobs:
           make test-site-replication-oidc
   iam-import-with-missing-entities:
     name: Test IAM import in new cluster with missing entities
-    runs-on: tau-minio
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -141,7 +141,7 @@ jobs:
           make test-iam-import-with-missing-entities
   iam-import-with-openid:
     name: Test IAM import in new cluster with opendid configurations
-    runs-on: tau-minio
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
