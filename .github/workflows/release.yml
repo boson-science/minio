@@ -22,7 +22,7 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'RELEASE.')
     # Releases are published only to GitHub Container Registry; downstream
     # users mirror from there.
-    runs-on: tau-minio
+    runs-on: ubuntu-latest
     environment: downstream-release
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

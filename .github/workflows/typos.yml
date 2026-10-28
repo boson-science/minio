@@ -9,7 +9,7 @@ permissions:
 jobs:
   run:
     name: Spell Check with Typos
-    runs-on: tau-minio
+    runs-on: ubuntu-latest
     env:
       TYPOS_VERSION: v1.51.1
       TYPOS_SHA256: 93c301fd4120ff076e2cc2a6d6a61cab4a4bdb81899287c0938b452e56d1f454
