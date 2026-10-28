@@ -14,12 +14,21 @@ permissions:
 jobs:
   release:
     runs-on: self-hosted
+    env:
+      HELM_VERSION: v3.22.1
+      HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        run: |
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://get.helm.sh/${archive}"
+          echo "${HELM_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/bin" --strip-components=1 linux-amd64/helm
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run helm lint
         run: |
