@@ -9,6 +9,7 @@ VERSION ?= $(shell git describe --tags)
 REPO ?= quay.io/minio
 TAG ?= $(REPO)/minio:$(VERSION)
 
+GOLANGCI_VERSION = 2.15.0
 GOLANGCI_DIR = .bin/golangci/$(GOLANGCI_VERSION)
 GOLANGCI = $(GOLANGCI_DIR)/golangci-lint
 
@@ -23,7 +24,7 @@ help: ## print this help
 
 getdeps: ## fetch necessary dependencies
 	@mkdir -p ${GOPATH}/bin
-	@echo "Installing golangci-lint" && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOLANGCI_DIR)
+	@bash buildscripts/install-golangci-lint.sh "$(GOLANGCI_DIR)"
 
 crosscompile: ## cross compile minio
 	@(env bash $(PWD)/buildscripts/cross-compile.sh)
