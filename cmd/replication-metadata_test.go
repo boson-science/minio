@@ -26,7 +26,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -515,13 +514,13 @@ func TestReplicationMetadataInjection(t *testing.T) {
 		c.Fatal(err)
 	}
 	if got := oi.UserDefined[ReservedMetadataPrefix+"actual-size"]; got != "12345" {
-		c.Fatal(fmt.Sprintf("replicator CompleteMultipartUpload: want actual size 12345, got %q", got))
+		c.Fatalf("replicator CompleteMultipartUpload: want actual size 12345, got %q", got)
 	}
 }
 
 // TestReplicationHeadersRequirePermission verifies that replication-only
 // request headers (X-Minio-Source-Replication-Request, replication status,
-// source ETag/mtime and friends) are honoured only for principals allowed
+// source ETag/mtime and friends) are honored only for principals allowed
 // to replicate.
 func TestReplicationHeadersRequirePermission(t *testing.T) {
 	// SSE-C requires TLS.
@@ -806,7 +805,7 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 	}
 	// A source replicator passes the key check (raw copies of SSE-C objects
 	// to other objects are not a replication flow and fail later).
-	resp, body = do(replicator, http.MethodPut, objURL(lockBucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
+	_, body = do(replicator, http.MethodPut, objURL(lockBucket, "ssec-copy", nil), nil, merge(sourceRepl, map[string]string{
 		xhttp.AmzCopySource: "/" + bucket + "/ssec",
 	}))
 	if bytes.Contains(body, sseAlgErr) {
@@ -852,7 +851,7 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 	}
 	for _, d := range deleters {
 		object := "delete-" + d.name
-		// The delete marker readiness check is honoured only with s3:ReplicateDelete.
+		// The delete marker readiness check is honored only with s3:ReplicateDelete.
 		hreq, err := newTestSignedRequestV4(http.MethodHead, objURL(bucket, object, nil), 0, nil, d.cred.AccessKey, d.cred.SecretKey,
 			map[string]string{xhttp.MinIOCheckDMReplicationReady: "true"})
 		if err != nil {

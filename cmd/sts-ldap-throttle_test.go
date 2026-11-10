@@ -254,7 +254,7 @@ func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 	perNet := ldapThrottleSourcePolicy.freeAttempts
 	perSite := ldapThrottleSitePolicy.freeAttempts
 
-	// One /64 reaching its spraying limit does not block a neighbouring /64
+	// One /64 reaching its spraying limit does not block a neighboring /64
 	// of the same /48.
 	for i := range perNet {
 		if th.acquire(fmt.Sprint("user", i), ldapTestSourceOf("[2001:db8:1:1::1]:1")) == nil {
@@ -265,7 +265,7 @@ func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 		t.Fatal("/64 spraying usernames must be throttled")
 	}
 	if th.acquire("another", ldapTestSourceOf("[2001:db8:1:2::1]:1")) == nil {
-		t.Fatal("a neighbouring /64 must not be throttled by the /64 limit")
+		t.Fatal("a neighboring /64 must not be throttled by the /64 limit")
 	}
 
 	// Spraying across many /64s of one /48, each below the /64 limit, is
@@ -298,7 +298,7 @@ func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 	}
 
 	// The (user, source) backoff uses /64: guessing from one /64 does not
-	// block the same user from a neighbouring /64.
+	// block the same user from a neighboring /64.
 	th, _ = newTestLDAPThrottle()
 	free := ldapThrottlePairPolicy.freeAttempts
 	for range free {
@@ -308,7 +308,7 @@ func TestLDAPThrottleIPv6Grouping(t *testing.T) {
 		t.Fatal("addresses of one /64 must share the pair backoff")
 	}
 	if th.acquire("alice", ldapTestSourceOf("[2001:db8:5:2::1]:1")) == nil {
-		t.Fatal("a neighbouring /64 must not share the pair backoff")
+		t.Fatal("a neighboring /64 must not share the pair backoff")
 	}
 }
 

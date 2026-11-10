@@ -20,7 +20,6 @@ package cmd
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -33,7 +32,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/minio/minio/internal/bpool"
 	"github.com/minio/minio/internal/grid"
 	"github.com/tinylib/msgp/msgp"
 
@@ -957,157 +955,6 @@ func waitForHTTPResponse(respBody io.Reader) (io.Reader, error) {
 			continue
 		default:
 			return nil, fmt.Errorf("unexpected filler byte: %d", b)
-		}
-	}
-}
-
-// httpStreamResponse allows streaming a response, but still send an error.
-type httpStreamResponse struct {
-	done  chan error
-	block chan []byte
-	err   error
-}
-
-// Write part of the streaming response.
-// Note that upstream errors are currently not forwarded, but may be in the future.
-func (h *httpStreamResponse) Write(b []byte) (int, error) {
-	if len(b) == 0 || h.err != nil {
-		// Ignore 0 length blocks
-		return 0, h.err
-	}
-	tmp := make([]byte, len(b))
-	copy(tmp, b)
-	h.block <- tmp
-	return len(b), h.err
-}
-
-// CloseWithError will close the stream and return the specified error.
-// This can be done several times, but only the first error will be sent.
-// After calling this the stream should not be written to.
-func (h *httpStreamResponse) CloseWithError(err error) {
-	if h.done == nil {
-		return
-	}
-	h.done <- err
-	h.err = err
-	// Indicates that the response is done.
-	<-h.done
-	h.done = nil
-}
-
-// streamHTTPResponse can be used to avoid timeouts with long storage
-// operations, such as bitrot verification or data usage scanning.
-// Every 10 seconds a space character is sent.
-// The returned function should always be called to release resources.
-// An optional error can be sent which will be picked as text only error,
-// without its original type by the receiver.
-// waitForHTTPStream should be used to the receiving side.
-func streamHTTPResponse(w http.ResponseWriter) *httpStreamResponse {
-	doneCh := make(chan error)
-	blockCh := make(chan []byte)
-	h := httpStreamResponse{done: doneCh, block: blockCh}
-	go func() {
-		canWrite := true
-		write := func(b []byte) {
-			if canWrite {
-				n, err := w.Write(b)
-				if err != nil || n != len(b) {
-					canWrite = false
-				}
-			}
-		}
-
-		ticker := time.NewTicker(time.Second * 10)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				// Response not ready, write a filler byte.
-				write([]byte{32})
-				if canWrite {
-					xhttp.Flush(w)
-				}
-			case err := <-doneCh:
-				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
-				} else {
-					write([]byte{0})
-				}
-				xioutil.SafeClose(doneCh)
-				return
-			case block := <-blockCh:
-				var tmp [5]byte
-				tmp[0] = 2
-				binary.LittleEndian.PutUint32(tmp[1:], uint32(len(block)))
-				write(tmp[:])
-				write(block)
-				if canWrite {
-					xhttp.Flush(w)
-				}
-			}
-		}
-	}()
-	return &h
-}
-
-var poolBuf8k = bpool.Pool[*[]byte]{
-	New: func() *[]byte {
-		b := make([]byte, 8192)
-		return &b
-	},
-}
-
-// waitForHTTPStream will wait for responses where
-// streamHTTPResponse has been used.
-// The returned reader contains the payload and must be closed if no error is returned.
-func waitForHTTPStream(respBody io.ReadCloser, w io.Writer) error {
-	var tmp [1]byte
-	// 8K copy buffer, reused for less allocs...
-	bufp := poolBuf8k.Get()
-	buf := *bufp
-	defer poolBuf8k.Put(bufp)
-
-	for {
-		_, err := io.ReadFull(respBody, tmp[:])
-		if err != nil {
-			return err
-		}
-		// Check if we have a response ready or a filler byte.
-		switch tmp[0] {
-		case 0:
-			// 0 is unbuffered, copy the rest.
-			_, err := io.CopyBuffer(w, respBody, buf)
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		case 1:
-			errorText, err := io.ReadAll(respBody)
-			if err != nil {
-				return err
-			}
-			return errors.New(string(errorText))
-		case 2:
-			// Block of data
-			var tmp [4]byte
-			_, err := io.ReadFull(respBody, tmp[:])
-			if err != nil {
-				return err
-			}
-			length := binary.LittleEndian.Uint32(tmp[:])
-			n, err := io.CopyBuffer(w, io.LimitReader(respBody, int64(length)), buf)
-			if err != nil {
-				return err
-			}
-			if n != int64(length) {
-				return io.ErrUnexpectedEOF
-			}
-			continue
-		case 32:
-			continue
-		default:
-			return fmt.Errorf("unexpected filler byte: %d", tmp[0])
 		}
 	}
 }

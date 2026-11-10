@@ -89,7 +89,7 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
-	// Replication-only metadata is honoured only for authorized replication requests.
+	// Replication-only metadata is honored only for authorized replication requests.
 	var replMeta bool
 	if hasReplicationMetadata(r.Header) {
 		var s3Err APIErrorCode
