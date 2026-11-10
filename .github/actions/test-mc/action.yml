@@ -1,0 +1,14 @@
+name: Build test mc
+description: Build the pinned MinIO client for integration tests on a disposable runner.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/minio-test-bin"
+        GOBIN="$RUNNER_TEMP/minio-test-bin" go install github.com/minio/mc@77f82e18b5401a65958f1619df6ebb994634bd88
+        install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" "$GITHUB_WORKSPACE/mc"
+        install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" "$GITHUB_WORKSPACE/.github/workflows/multipart/mc"
+        install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" /tmp/mc
+        echo "$RUNNER_TEMP/minio-test-bin" >> "$GITHUB_PATH"

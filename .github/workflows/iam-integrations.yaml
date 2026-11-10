@@ -77,6 +77,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
+      - name: Build pinned test client
+        uses: ./.github/actions/test-mc
       - name: Test LDAP/OpenID/Etcd combo
         env:
           _MINIO_LDAP_TEST_SERVER: ${{ matrix.ldap }}
@@ -131,6 +133,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
+      - name: Build pinned test client
+        uses: ./.github/actions/test-mc
       - name: Checkout minio-iam-testing
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -148,6 +152,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
+      - name: Build pinned test client
+        uses: ./.github/actions/test-mc
       - name: Checkout minio-iam-testing
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

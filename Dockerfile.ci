@@ -1,0 +1,9 @@
+# Test image only: both binaries are built from the checked-out candidate and
+# the pinned test client before this image is built.
+FROM registry.access.redhat.com/ubi9/ubi-micro@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6
+COPY minio /usr/bin/minio
+COPY mc /usr/bin/mc
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+VOLUME ["/data"]
+CMD ["minio"]
