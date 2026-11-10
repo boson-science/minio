@@ -12,3 +12,4 @@ runs:
         install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" "$GITHUB_WORKSPACE/.github/workflows/multipart/mc"
         install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" /tmp/mc
         echo "$RUNNER_TEMP/minio-test-bin" >> "$GITHUB_PATH"
+        echo "MC_TEST_CLIENT=$RUNNER_TEMP/minio-test-bin/mc" >> "$GITHUB_ENV"

@@ -219,17 +219,11 @@ function __init__() {
 	mkdir -p "$MINIO_CONFIG_DIR"
 	mkdir -p "$MINT_DATA_DIR"
 
-	MC_BUILD_DIR="mc-$RANDOM"
-	if ! git clone --quiet https://github.com/minio/mc "$MC_BUILD_DIR"; then
-		echo "failed to download https://github.com/minio/mc"
-		purge "${MC_BUILD_DIR}"
-		exit 1
+	if [ -n "${MC_TEST_CLIENT:-}" ]; then
+		install -m 0755 "$MC_TEST_CLIENT" "$WORK_DIR/mc"
+	else
+		GOBIN="$WORK_DIR" go install github.com/minio/mc@77f82e18b5401a65958f1619df6ebb994634bd88
 	fi
-
-	(cd "${MC_BUILD_DIR}" && go build -o "${WORK_DIR}/mc")
-
-	# remove mc source.
-	purge "${MC_BUILD_DIR}"
 
 	shred -n 1 -s 1M - 1>"$FILE_1_MB" 2>/dev/null
 	shred -n 1 -s 65M - 1>"$FILE_65_MB" 2>/dev/null
@@ -237,8 +231,8 @@ function __init__() {
 	## version is purposefully set to '3' for minio to migrate configuration file
 	echo '{"version": "3", "credential": {"accessKey": "minio", "secretKey": "minio123"}, "region": "us-east-1"}' >"$MINIO_CONFIG_DIR/config.json"
 
-	if ! wget -q -O "$FUNCTIONAL_TESTS" https://raw.githubusercontent.com/minio/mc/master/functional-tests.sh; then
-		echo "failed to download https://raw.githubusercontent.com/minio/mc/master/functional-tests.sh"
+	if ! wget -q -O "$FUNCTIONAL_TESTS" https://raw.githubusercontent.com/minio/mc/77f82e18b5401a65958f1619df6ebb994634bd88/functional-tests.sh; then
+		echo "failed to download pinned mc functional tests"
 		exit 1
 	fi
 
