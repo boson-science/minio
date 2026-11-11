@@ -102,7 +102,7 @@ var validSSEReplicationHeaders = map[string]string{
 //
 // These headers carry internal object metadata (SSE seal parameters, actual
 // object size and the encrypted SSE-C checksum) from a replication source.
-// They are never extracted as regular metadata and are only honoured from
+// They are never extracted as regular metadata and are only honored from
 // the headers of authorized replication requests, see
 // replicationMetadataAllowed and extractReplicationMetadata.
 var replicationToInternalHeaders = map[string]string{
@@ -229,7 +229,7 @@ func extractMetadataFromMime(ctx context.Context, v textproto.MIMEHeader, m map[
 
 // replicationOnlyHeaders are request headers through which a replication
 // source transfers the state of an object to its replica. Together with
-// replicationToInternalHeaders they are honoured only for principals that
+// replicationToInternalHeaders they are honored only for principals that
 // are allowed to replicate, see replicationSafeHeader.
 var replicationOnlyHeaders = []string{
 	xhttp.MinIOSourceReplicationRequest,
@@ -268,7 +268,7 @@ func withoutReplicationOnlyHeaders(h http.Header) http.Header {
 	return h
 }
 
-// replicationSafeHeader returns the headers of r that may be honoured for
+// replicationSafeHeader returns the headers of r that may be honored for
 // bucket/object. Replication-only headers are kept only if the requester
 // is allowed the replication action (s3:ReplicateObject or
 // s3:ReplicateDelete), otherwise a copy of r.Header without them is
@@ -355,7 +355,7 @@ func hasReplicationMetadata(h http.Header) bool {
 }
 
 // replicationMetadataAllowed reports whether the replication-only metadata
-// headers of r may be honoured. This is only the case for replication
+// headers of r may be honored. This is only the case for replication
 // requests (X-Minio-Source-Replication-Request: true) sent by a principal
 // allowed to perform s3:ReplicateObject on the object.
 //

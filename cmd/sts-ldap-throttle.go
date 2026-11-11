@@ -46,7 +46,7 @@ import (
 //   - source: distinct usernames failing from one source (password spraying).
 //   - site: distinct usernames failing from one IPv6 /48, with a much higher
 //     limit, so that rotating through /64s does not avoid the source limit
-//     while one /64 cannot block its /48 neighbours.
+//     while one /64 cannot block its /48 neighbors.
 var (
 	ldapThrottlePairPolicy   = backoffPolicy{freeAttempts: 5, baseDelay: time.Second, maxDelay: 5 * time.Minute}
 	ldapThrottleUserPolicy   = backoffPolicy{freeAttempts: 50, baseDelay: time.Second, maxDelay: 5 * time.Minute}
@@ -262,7 +262,7 @@ func ldapIsTrustedProxy(addr netip.Addr, trusted []netip.Prefix) bool {
 }
 
 // ldapClientAddr returns the client address of r for throttling. Forwarding
-// headers are only honoured when the TCP peer is a trusted proxy; then the
+// headers are only honored when the TCP peer is a trusted proxy; then the
 // right-most X-Forwarded-For hop that is not itself a trusted proxy is used.
 // If no such hop exists or a hop cannot be parsed, the peer address is used.
 func ldapClientAddr(r *http.Request, trusted []netip.Prefix) string {

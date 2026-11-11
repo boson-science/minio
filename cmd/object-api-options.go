@@ -110,7 +110,7 @@ func getOpts(ctx context.Context, r *http.Request, bucket, object string) (Objec
 		}
 	}
 
-	// replication-only headers are honoured only from replicators
+	// replication-only headers are honored only from replicators
 	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateObjectAction)
 
 	// default case of passing encryption headers to backend
@@ -303,7 +303,7 @@ func delOpts(ctx context.Context, r *http.Request, bucket, object string) (opts 
 		opts.VersionID = nullVersionID
 	}
 
-	// replication-only headers are honoured only from delete replicators
+	// replication-only headers are honored only from delete replicators
 	hdr := replicationSafeHeader(ctx, r, bucket, object, policy.ReplicateDeleteAction)
 	_, opts.ReplicationRequest = hdr[xhttp.MinIOSourceReplicationRequest]
 

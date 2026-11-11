@@ -1189,7 +1189,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	// replication-only headers are honoured only from replicators
+	// replication-only headers are honored only from replicators
 	replHdr := replicationSafeHeader(ctx, r, dstBucket, dstObject, policy.ReplicateObjectAction)
 
 	// Read escaped copy source path to check for parameters.
@@ -2471,7 +2471,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 				return err
 			}
 			maps.Copy(metadata, m)
-			// replication-only PAX records are honoured only from replicators
+			// replication-only PAX records are honored only from replicators
 			if hasReplicationOnlyHeaders(hdrs) && !replicationAllowed(ctx, r, bucket, object, policy.ReplicateObjectAction) {
 				if _, ok := hdrs[xhttp.MinIOSourceReplicationRequest]; ok {
 					return PrefixAccessDenied{Bucket: bucket, Object: object}

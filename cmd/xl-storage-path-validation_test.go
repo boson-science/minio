@@ -118,12 +118,12 @@ func pathValidationSetup(t *testing.T) *pathValidationEnv {
 	}
 
 	files := map[string]string{
-		"sentinel":                               pathValidationSentinel,
-		"outobj/" + xlStorageFormatFile:          string(xlMeta),
-		"outobj/" + env.seed.DataDir + "/part.1": pathValidationSentinel,
-		"outobj/part.1.meta":                     "x",
+		"sentinel":                                               pathValidationSentinel,
+		"outobj/" + xlStorageFormatFile:                          string(xlMeta),
+		"outobj/" + env.seed.DataDir + "/part.1":                 pathValidationSentinel,
+		"outobj/part.1.meta":                                     "x",
 		"outobj/" + env.bkpDir + "/" + xlStorageFormatFileBackup: string(xlMeta),
-		"outdir/part.1": pathValidationSentinel,
+		"outdir/part.1":                                          pathValidationSentinel,
 	}
 
 	outside := func() map[string]string {
