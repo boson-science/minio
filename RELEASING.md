@@ -15,6 +15,10 @@ and `mc admin info` report releases exactly as upstream builds do.
 
 1. Make sure every entry in `security/advisory-matrix.json` is `closed`. The
    release workflow refuses to publish otherwise.
+   Run the 13 manually dispatched release-validation workflows listed in
+   `buildscripts/check-release-ci.sh` against the exact release commit and wait
+   for their latest runs to pass. VulnCheck and both CodeQL language jobs must
+   also pass on that commit. A newer failed or unfinished run blocks release.
 2. Tag the tip of `master` with the current UTC time:
 
    ```sh
