@@ -31,7 +31,7 @@ jobs:
       - name: Check downstream release Dockerfile
         run: |
           docker buildx build --check \
-            --build-arg BUILD_BASE=golang:1.26.10-alpine \
+            --build-arg BUILD_BASE=golang:1.26.11-alpine \
             --build-arg RUNTIME_BASE=registry.access.redhat.com/ubi9/ubi-micro \
             -f Dockerfile.downstream .
       - name: Build on ${{ matrix.os }}

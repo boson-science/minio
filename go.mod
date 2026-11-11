@@ -2,7 +2,7 @@ module github.com/minio/minio
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 // Install tools using 'go install tool'.
 tool (
