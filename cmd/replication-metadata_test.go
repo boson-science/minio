@@ -970,6 +970,21 @@ func TestReplicationHeadersRequirePermission(t *testing.T) {
 				c.Fatalf("%s: missing notification, got %v", key, notified)
 			}
 		}
+		// Per-entry PutObject denial is returned once by the handler even when
+		// other small tar entries are being processed concurrently.
+		putCarveOut := replTestUserStatements(ctx, c, s, "extract-put-carveout",
+			replTestStatement([]string{bucket}, "s3:PutObject", "s3:GetObject"),
+			map[string]any{
+				"Effect": "Deny", "Action": []string{"s3:PutObject"},
+				"Resource": []string{"arn:aws:s3:::" + bucket + "/prefix/blocked/*"},
+			})
+		resp, body = do(putCarveOut, http.MethodPut, objURL(bucket, "blocked.tar", nil), tarOf("allowed-a", "blocked/x", "allowed-b"), map[string]string{
+			xhttp.AmzSnowballExtract: "true", xhttp.MinIOSnowballPrefix: "prefix",
+		})
+		expectStatus("PutObjectExtract per-entry put denial", resp, body, http.StatusForbidden)
+		if _, err := s.testServer.Obj.GetObjectInfo(ctx, bucket, "prefix/blocked/x", ObjectOptions{}); err == nil {
+			c.Fatal("prefix/blocked/x: stored despite explicit PutObject denial")
+		}
 	}
 
 	// 9. Batch replication sends replication requests without a REPLICA
