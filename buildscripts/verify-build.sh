@@ -227,6 +227,11 @@ function __init__() {
 
 	shred -n 1 -s 1M - 1>"$FILE_1_MB" 2>/dev/null
 	shred -n 1 -s 65M - 1>"$FILE_65_MB" 2>/dev/null
+	# Check the fixture contents before the client suite runs. An empty input can
+	# make mc od panic and would also invalidate all the object-copy tests.
+	printf 'Fixture sizes (bytes): 1 MiB=%s, 65 MiB=%s\n' "$(wc -c <"$FILE_1_MB")" "$(wc -c <"$FILE_65_MB")"
+	test "$(wc -c <"$FILE_1_MB")" -eq 1048576
+	test "$(wc -c <"$FILE_65_MB")" -eq 68157440
 
 	## version is purposefully set to '3' for minio to migrate configuration file
 	echo '{"version": "3", "credential": {"accessKey": "minio", "secretKey": "minio123"}, "region": "us-east-1"}' >"$MINIO_CONFIG_DIR/config.json"
@@ -244,6 +249,7 @@ function main() {
 	echo "Testing in FS setup"
 	if ! run_test_fs; then
 		echo "FAILED"
+		wc -c "$FILE_1_MB" "$FILE_65_MB" || true
 		purge "$WORK_DIR"
 		exit 1
 	fi

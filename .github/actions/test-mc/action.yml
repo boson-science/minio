@@ -11,5 +11,9 @@ runs:
         install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" "$GITHUB_WORKSPACE/mc"
         install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" "$GITHUB_WORKSPACE/.github/workflows/multipart/mc"
         install -m 0755 "$RUNNER_TEMP/minio-test-bin/mc" /tmp/mc
+        old_mc="$RUNNER_TEMP/minio-test-bin/mc-2021"
+        curl -fsSL --retry 3 -o "$old_mc" https://github.com/minio/mc/releases/download/RELEASE.2021-03-12T03-36-59Z/mc.linux-amd64.RELEASE.2021-03-12T03-36-59Z
+        printf '%s  %s\n' 8296d4aa02a4cd9cb812bae4d0f65a2bb4003e1475192dcfc1fd42a726250ffa "$old_mc" | sha256sum -c -
+        install -m 0755 "$old_mc" "$GITHUB_WORKSPACE/mc.RELEASE.2021-03-12T03-36-59Z"
         echo "$RUNNER_TEMP/minio-test-bin" >> "$GITHUB_PATH"
         echo "MC_TEST_CLIENT=$RUNNER_TEMP/minio-test-bin/mc" >> "$GITHUB_ENV"
