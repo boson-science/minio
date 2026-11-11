@@ -1,4 +1,6 @@
+# check=skip=InvalidDefaultArgInFrom
 ARG BUILD_BASE
+ARG RUNTIME_BASE
 FROM ${BUILD_BASE} AS build
 
 ARG LDFLAGS
@@ -11,7 +13,6 @@ RUN test "$(go env GOVERSION)" = "$(sed -n 's/^toolchain //p' go.mod)"
 # LDFLAGS come from buildscripts/gen-ldflags.go, as in upstream builds.
 RUN test -n "${LDFLAGS}" && go build -trimpath -ldflags "${LDFLAGS}" -o /out/minio .
 
-ARG RUNTIME_BASE
 FROM ${RUNTIME_BASE}
 ARG RELEASE
 LABEL org.opencontainers.image.title="MinIO" \
