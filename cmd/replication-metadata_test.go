@@ -37,8 +37,10 @@ import (
 
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio/internal/crypto"
 	"github.com/minio/minio/internal/event"
 	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/minio/internal/kms"
 	"github.com/minio/minio/internal/pubsub"
 	"github.com/minio/mux"
 	"github.com/minio/pkg/v3/policy"
@@ -248,6 +250,8 @@ func replTestDo(c *check, s *TestSuiteIAM, cred madmin.Credentials, method, urlS
 // and checksum metadata cannot be injected by principals that are not
 // allowed to replicate objects (GHSA-3rh2-v3gr-35p9).
 func TestReplicationMetadataInjection(t *testing.T) {
+	defer func(wasTLS bool) { globalIsTLS = wasTLS }(globalIsTLS)
+	globalIsTLS = true
 	s := newTestSuiteIAM(TestSuiteCommon{serverType: "ErasureSD", signer: signerV4}, false)
 	c := &check{t, s.serverType}
 	s.SetUpSuite(c)
@@ -503,6 +507,74 @@ func TestReplicationMetadataInjection(t *testing.T) {
 		if got := oi.UserDefined[internal]; got != injected[k] {
 			c.Fatalf("replicator PutObject: %s want %q, got %q", internal, injected[k], got)
 		}
+	}
+
+	// A pre-encrypted SSE-C replica must not be encrypted again by the
+	// destination bucket's default KMS configuration.
+	previousKMS := GlobalKMS
+	GlobalKMS = kms.NewStub("default-test-key")
+	defer func() { GlobalKMS = previousKMS }()
+	config := []byte(`<ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>default-test-key</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`)
+	if _, err := globalBucketMetadataSys.Update(ctx, bucket, bucketSSEConfig, config); err != nil {
+		c.Fatal(err)
+	}
+	resp, body = do(replicator, http.MethodPut, objURL("repl-ssec-kms", nil), data, withHeaders(sourceRepl, injected))
+	expectStatus("replicator SSE-C PutObject into KMS bucket", resp, body, http.StatusOK)
+	oi, err = s.testServer.Obj.GetObjectInfo(ctx, bucket, "repl-ssec-kms", ObjectOptions{})
+	if err != nil {
+		c.Fatal(err)
+	}
+	if !crypto.SSEC.IsEncrypted(oi.UserDefined) || crypto.S3KMS.IsEncrypted(oi.UserDefined) {
+		c.Fatalf("replicated SSE-C metadata was replaced by default bucket encryption")
+	}
+
+	// Exercise real ciphertext and a customer-key read of the replica.
+	customerKey := bytes.Repeat([]byte{42}, 32)
+	keyDigest := md5.Sum(customerKey)
+	customerHeaders := map[string]string{
+		xhttp.AmzServerSideEncryptionCustomerAlgorithm: "AES256",
+		xhttp.AmzServerSideEncryptionCustomerKey:       base64.StdEncoding.EncodeToString(customerKey),
+		xhttp.AmzServerSideEncryptionCustomerKeyMD5:    base64.StdEncoding.EncodeToString(keyDigest[:]),
+	}
+	encryptRequest, err := http.NewRequest(http.MethodPut, objURL("repl-ssec-read", nil), nil)
+	if err != nil {
+		c.Fatal(err)
+	}
+	for k, v := range customerHeaders {
+		encryptRequest.Header.Set(k, v)
+	}
+	sealedMetadata := map[string]string{}
+	encrypted, _, err := EncryptRequest(bytes.NewReader(data), encryptRequest, bucket, "repl-ssec-read", sealedMetadata)
+	if err != nil {
+		c.Fatal(err)
+	}
+	ciphertext, err := io.ReadAll(encrypted)
+	if err != nil {
+		c.Fatal(err)
+	}
+	replicaHeaders := map[string]string{xhttp.MinIOSourceReplicationRequest: "true"}
+	for internal, header := range validSSEReplicationHeaders {
+		if v, ok := sealedMetadata[internal]; ok {
+			replicaHeaders[header] = v
+		}
+	}
+	resp, body = do(replicator, http.MethodPut, objURL("repl-ssec-read", nil), ciphertext, replicaHeaders)
+	expectStatus("replicate encrypted bytes", resp, body, http.StatusOK)
+	resp, body = do(user, http.MethodGet, objURL("repl-ssec-read", nil), nil, customerHeaders)
+	expectStatus("read SSE-C replica", resp, body, http.StatusOK)
+	if !bytes.Equal(body, data) {
+		c.Fatal("replicated SSE-C plaintext differs")
+	}
+
+	// Untrusted replication metadata cannot bypass bucket encryption.
+	resp, body = do(user, http.MethodPut, objURL("untrusted-kms", nil), data, injected)
+	expectStatus("ordinary PutObject with injected metadata", resp, body, http.StatusOK)
+	oi, err = s.testServer.Obj.GetObjectInfo(ctx, bucket, "untrusted-kms", ObjectOptions{})
+	if err != nil {
+		c.Fatal(err)
+	}
+	if !crypto.S3KMS.IsEncrypted(oi.UserDefined) || crypto.SSEC.IsEncrypted(oi.UserDefined) {
+		c.Fatal("untrusted replication metadata bypassed bucket encryption")
 	}
 
 	resp, body = multipartUpload(replicator, "repl-mp-size", data, nil, withHeaders(sourceRepl, map[string]string{
