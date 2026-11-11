@@ -71,7 +71,20 @@ add_alias
 mc mb minio/minio-test/
 mc cp ./minio minio/minio-test/to-read/
 mc cp /etc/hosts minio/minio-test/to-read/hosts
-mc anonymous set download minio/minio-test
+# The 2019 cluster can accept writes before every node has finished starting.
+# Retry the actual policy operation, but fail if it never succeeds.
+policy_ready=false
+for i in $(seq 1 60); do
+	if mc anonymous set download minio/minio-test; then
+		policy_ready=true
+		break
+	fi
+	sleep 5
+done
+if [ "$policy_ready" != true ]; then
+	echo 'Anonymous policy could not be set within five minutes' >&2
+	exit 1
+fi
 verify_checksum_mc ./minio minio/minio-test/to-read/minio
 old_sum=$(curl -fsS http://127.0.0.1:9000/minio-test/to-read/hosts | sha256sum)
 MINIO_IMAGE="$old_image" "${compose[@]}" stop
