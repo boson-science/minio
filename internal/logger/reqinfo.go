@@ -63,6 +63,23 @@ type ReqInfo struct {
 	sync.RWMutex
 }
 
+// Clone makes a separate request-info record for a concurrent worker.
+func (r *ReqInfo) Clone() *ReqInfo {
+	if r == nil {
+		return &ReqInfo{}
+	}
+	r.RLock()
+	defer r.RUnlock()
+	return &ReqInfo{
+		RemoteHost: r.RemoteHost, Host: r.Host, UserAgent: r.UserAgent,
+		DeploymentID: r.DeploymentID, RequestID: r.RequestID, API: r.API,
+		BucketName: r.BucketName, ObjectName: r.ObjectName, VersionID: r.VersionID,
+		Objects: append([]ObjectVersion(nil), r.Objects...), Cred: r.Cred,
+		Region: r.Region, Owner: r.Owner, AuthType: r.AuthType,
+		tags: append([]KeyVal(nil), r.tags...),
+	}
+}
+
 // NewReqInfo :
 func NewReqInfo(remoteHost, userAgent, deploymentID, requestID, api, bucket, object string) *ReqInfo {
 	return &ReqInfo{
