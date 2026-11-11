@@ -15,6 +15,19 @@ new_image="minio-upgrade-${GITHUB_RUN_ID:-$$}:current"
 cleanup() {
 	status=$?
 	if [ "$status" -ne 0 ]; then
+		# Capture reads through each backend before stopping the test cluster.
+		# This distinguishes a node-specific 404 from a cluster-wide failure.
+		if [ -f "$work/mc-config/config.json" ]; then
+			(
+				set +e
+				for node in minio1 minio2 minio3 minio4; do
+					printf '\n=== %s ===\n' "$node"
+					timeout 30s "${MC_TEST_CLIENT:?}" --config-dir "$work/mc-config" stat "$node/minio-test/to-read/minio"
+					timeout 30s "${MC_TEST_CLIENT:?}" --config-dir "$work/mc-config" cat "$node/minio-test/to-read/minio" | sha256sum
+					printf 'read exit status: %s\n' "${PIPESTATUS[0]}"
+				done
+			) >"$work/node-reads.log" 2>&1
+		fi
 		MINIO_IMAGE="$new_image" "${compose[@]}" logs --no-color >"$work/compose.log" 2>&1 || true
 		echo "Upgrade test failed; logs and Compose volumes retained for diagnosis: $work ($COMPOSE_PROJECT_NAME)" >&2
 		MINIO_IMAGE="$new_image" "${compose[@]}" down --remove-orphans || true

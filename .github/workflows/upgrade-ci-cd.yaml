@@ -39,5 +39,6 @@ jobs:
           path: |
             ${{ runner.temp }}/minio-upgrade.*/compose.log
             ${{ runner.temp }}/minio-upgrade.*/heal.jsonl
+            ${{ runner.temp }}/minio-upgrade.*/node-reads.log
           if-no-files-found: warn
           retention-days: 7
