@@ -26,6 +26,8 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
+      - name: Build pinned test client
+        uses: ./.github/actions/test-mc
       - name: Test Decom
         run: |
           sudo sysctl net.ipv6.conf.all.disable_ipv6=0
