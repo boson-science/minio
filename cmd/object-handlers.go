@@ -2227,6 +2227,10 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 // based off from AWS Snowball feature to auto extract compressed
 // stream will be extracted in the same directory it is stored in
 // and the folder structures will be built out accordingly.
+type snowballAuthorizationError struct{ code APIErrorCode }
+
+func (e snowballAuthorizationError) Error() string { return errorCodes.ToAPIErr(e.code).Code }
+
 func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "PutObjectExtract")
 	defer logger.AuditLog(ctx, w, r, mustGetClaimsFromToken(r))
@@ -2396,11 +2400,16 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		sc = storageclass.STANDARD
 	}
 
+	// Snapshot request information before workers start mutating their copies.
+	workerReqInfo := logger.GetReqInfo(ctx).Clone()
 	putObjectTar := func(reader io.Reader, info os.FileInfo, object string) error {
+		// untar processes small entries concurrently. Authentication helpers
+		// populate Request.Form and request info, so each worker needs copies.
+		ctx := logger.SetReqInfo(ctx, workerReqInfo.Clone())
+		r := r.Clone(ctx)
 		size := info.Size()
-		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.PutObjectAction); s3Err != ErrNone {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
-			return errors.New(errorCodes.ToAPIErr(s3Err).Code)
+		if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.PutObjectAction); s3Err != ErrNone {
+			return snowballAuthorizationError{code: s3Err}
 		}
 		// The prefix-level check above only rejects early, replication
 		// permissions may differ per object.
@@ -2441,8 +2450,8 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		pReader := NewPutObjReader(rawReader)
 
 		if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
-			if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
-				return errors.New(errorCodes.ToAPIErr(s3Err).Code)
+			if s3Err := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
+				return snowballAuthorizationError{code: s3Err}
 			}
 			metadata[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
@@ -2505,8 +2514,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		}
 
 		if s3err != ErrNone {
-			s3Err = s3err
-			return ObjectLocked{}
+			return snowballAuthorizationError{code: s3err}
 		}
 
 		if dsc := mustReplicate(ctx, bucket, object, getMustReplicateOptions(metadata, "", "", replication.ObjectReplicationType, opts)); dsc.ReplicateAny() {
@@ -2595,6 +2603,11 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	}
 
 	if err = untar(ctx, hreader, putObjectTar, opts); err != nil {
+		var authErr snowballAuthorizationError
+		if errors.As(err, &authErr) {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(authErr.code), r.URL)
+			return
+		}
 		apiErr := errorCodes.ToAPIErr(s3Err)
 		// If not set, convert or use BadRequest
 		if s3Err == ErrNone {

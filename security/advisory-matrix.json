@@ -299,6 +299,17 @@
   ],
   "additional_fixes": [
     {
+      "id": "snowball-concurrent-authorization",
+      "fix": "security/snowball-request-race",
+      "regression_tests": [
+        {
+          "package": "./cmd",
+          "test": "TestReplicationHeadersRequirePermission"
+        }
+      ],
+      "note": "Concurrent extracted entries use isolated request and logging state; run this test with -race as well as the release gate."
+    },
+    {
       "id": "storage-path-validation",
       "fix": "fix/storage-path-validation",
       "regression_tests": [
