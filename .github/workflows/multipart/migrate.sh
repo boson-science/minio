@@ -1,13 +1,13 @@
 #!/bin/bash
 
-set -x
+set -euxo pipefail
 
 ## change working directory
 cd .github/workflows/multipart/
 
 function cleanup() {
-	docker-compose -f docker-compose-site1.yaml rm -s -f || true
-	docker-compose -f docker-compose-site2.yaml rm -s -f || true
+	docker compose -f docker-compose-site1.yaml rm -s -f || true
+	docker compose -f docker-compose-site2.yaml rm -s -f || true
 	for volume in $(docker volume ls -q | grep minio); do
 		docker volume rm ${volume} || true
 	done
@@ -19,23 +19,21 @@ function cleanup() {
 
 cleanup
 
-if [ ! -f ./mc ]; then
-	wget --quiet -O mc https://dl.minio.io/client/mc/release/linux-amd64/mc &&
-		chmod +x mc
-fi
+test -x ./mc
+test -x ./s3-check-md5
 
 export RELEASE=RELEASE.2023-08-29T23-07-35Z
 
-docker-compose -f docker-compose-site1.yaml up -d
-docker-compose -f docker-compose-site2.yaml up -d
+docker compose -f docker-compose-site1.yaml up -d
+docker compose -f docker-compose-site2.yaml up -d
 
 sleep 30s
 
 ./mc alias set site1 http://site1-nginx:9001 minioadmin minioadmin --api s3v4
 ./mc alias set site2 http://site2-nginx:9002 minioadmin minioadmin --api s3v4
 
-./mc ready site1/
-./mc ready site2/
+timeout 10m ./mc ready site1/
+timeout 10m ./mc ready site2/
 
 ./mc admin replicate add site1 site2
 ./mc mb site1/testbucket/
@@ -43,66 +41,46 @@ sleep 30s
 
 sleep 5
 
-./s3-check-md5 -h
+check_site() {
+	local site="$1" output
+	output=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint "http://${site}-nginx:900$2" -bucket testbucket 2>&1) || return 1
+	printf '%s\n' "$output"
+	grep -q 'INTACT' <<<"$output" || return 1
+	! grep -Eq 'FAILED|CORRUPTED' <<<"$output"
+}
 
-failed_count_site1=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site1-nginx:9001 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-failed_count_site2=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site2-nginx:9002 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-
-if [ $failed_count_site1 -ne 0 ]; then
-	echo "failed with multipart on site1 uploads"
-	exit 1
-fi
-
-if [ $failed_count_site2 -ne 0 ]; then
-	echo "failed with multipart on site2 uploads"
-	exit 1
-fi
+check_site site1 1
+check_site site2 2
 
 ./mc cp -r --quiet /usr/bin site1/testbucket/
 
 sleep 5
 
-failed_count_site1=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site1-nginx:9001 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-failed_count_site2=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site2-nginx:9002 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-
-## we do not need to fail here, since we are going to test
-## upgrading to master, healing and being able to recover
-## the last version.
-if [ $failed_count_site1 -ne 0 ]; then
-	echo "failed with multipart on site1 uploads ${failed_count_site1}"
-fi
-
-if [ $failed_count_site2 -ne 0 ]; then
-	echo "failed with multipart on site2 uploads ${failed_count_site2}"
-fi
+# A mismatch before healing is reported but remains recoverable by the upgrade.
+check_site site1 1 || echo "site1 requires healing after the second copy"
+check_site site2 2 || echo "site2 requires healing after the second copy"
 
 export RELEASE=${1}
 
-docker-compose -f docker-compose-site1.yaml up -d
-docker-compose -f docker-compose-site2.yaml up -d
+docker compose -f docker-compose-site1.yaml up -d
+docker compose -f docker-compose-site2.yaml up -d
 
-./mc ready site1/
-./mc ready site2/
+timeout 10m ./mc ready site1/
+timeout 10m ./mc ready site2/
 
+site1_healed=0
+site2_healed=0
 for i in $(seq 1 10); do
 	# mc admin heal -r --remove when used against a LB endpoint
 	# behaves flaky, let this run 10 times before giving up
-	./mc admin heal -r --remove --json site1/ 2>&1 >/dev/null
-	./mc admin heal -r --remove --json site2/ 2>&1 >/dev/null
+	if ./mc admin heal -r --remove --json site1/ >/dev/null; then site1_healed=1; fi
+	if ./mc admin heal -r --remove --json site2/ >/dev/null; then site2_healed=1; fi
 done
 
-failed_count_site1=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site1-nginx:9001 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-failed_count_site2=$(./s3-check-md5 -versions -access-key minioadmin -secret-key minioadmin -endpoint http://site2-nginx:9002 -bucket testbucket 2>&1 | grep FAILED | wc -l)
-
-if [ $failed_count_site1 -ne 0 ]; then
-	echo "failed with multipart on site1 uploads"
-	exit 1
-fi
-
-if [ $failed_count_site2 -ne 0 ]; then
-	echo "failed with multipart on site2 uploads"
-	exit 1
-fi
+test "$site1_healed" -eq 1
+test "$site2_healed" -eq 1
+check_site site1 1
+check_site site2 2
 
 # Add user group test
 ./mc admin user add site1 site-replication-issue-user site-replication-issue-password
@@ -113,9 +91,7 @@ wait_interval=5
 
 attempt=1
 while true; do
-	diff <(./mc admin group info site1 site-replication-issue-group) <(./mc admin group info site2 site-replication-issue-group)
-
-	if [[ $? -eq 0 ]]; then
+	if diff <(./mc admin group info site1 site-replication-issue-group) <(./mc admin group info site2 site-replication-issue-group); then
 		echo "Outputs are consistent."
 		break
 	fi
@@ -129,7 +105,7 @@ while true; do
 		sleep $wait_interval
 	fi
 
-	((attempt++))
+	((attempt += 1))
 done
 
 status=$(./mc admin group info site1 site-replication-issue-group --json | jq .groupStatus | tr -d '"')
