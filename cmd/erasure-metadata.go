@@ -300,7 +300,18 @@ func findFileInfoInQuorum(ctx context.Context, metaArr []FileInfo, modTime time.
 		etagOnly := modTime.Equal(timeSentinel) && (etag != "" && etag == meta.Metadata["etag"])
 		mtimeValid := meta.ModTime.Equal(modTime)
 		if mtimeValid || etagOnly {
-			fmt.Fprintf(h, "%v", meta.XLV1)
+			// A legacy object and its healed modern representation can be
+			// equivalent only for a non-deleted null version. Readers use
+			// each disk's own data directory; retain the existing format
+			// distinction for all other versions and delete markers.
+			format := "modern"
+			if meta.XLV1 {
+				format = "legacy"
+			}
+			if !meta.Deleted && (meta.VersionID == "" || meta.VersionID == nullVersionID) {
+				format = "null-data"
+			}
+			fmt.Fprint(h, format)
 			for _, part := range meta.Parts {
 				fmt.Fprintf(h, "part.%d", part.Number)
 				fmt.Fprintf(h, "part.%d", part.Size)

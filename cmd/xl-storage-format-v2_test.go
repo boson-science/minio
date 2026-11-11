@@ -1190,3 +1190,35 @@ func BenchmarkToFileInfoNoParts(b *testing.B) {
 func BenchmarkToFileInfoWithParts(b *testing.B) {
 	benchmarkManyPartsOptionally(b, true)
 }
+
+func TestMergeMigratingLegacyNullVersion(t *testing.T) {
+	legacy := xlMetaV2ShallowVersion{header: xlMetaV2VersionHeader{Type: LegacyType, ModTime: 1234, Signature: [4]byte{1}}}
+	migrated := xlMetaV2ShallowVersion{header: xlMetaV2VersionHeader{Type: ObjectType, ModTime: 1234, Signature: [4]byte{2}, Flags: xlFlagUsesDataDir, EcN: 6, EcM: 6}}
+	for seed := int64(0); seed < 200; seed++ {
+		inputs := [][]xlMetaV2ShallowVersion{{legacy}, {legacy}, {legacy}, {migrated}, {migrated}, {migrated}, nil, nil, nil, nil, nil, nil}
+		r := rand.New(rand.NewSource(seed))
+		r.Shuffle(len(inputs), func(i, j int) { inputs[i], inputs[j] = inputs[j], inputs[i] })
+		if got := mergeXLV2Versions(6, false, 1, inputs...); len(got) != 1 {
+			t.Fatalf("seed %d: want 1 matching version, got %d", seed, len(got))
+		}
+		if got := mergeXLV2Versions(6, true, 1, inputs...); len(got) != 0 {
+			t.Fatalf("seed %d: strict merge unexpectedly combined formats", seed)
+		}
+	}
+	cases := []struct {
+		name           string
+		legacy, object xlMetaV2VersionHeader
+	}{
+		{"different modtime", xlMetaV2VersionHeader{Type: LegacyType, ModTime: 1234}, xlMetaV2VersionHeader{Type: ObjectType, ModTime: 1235}},
+		{"non-null version", xlMetaV2VersionHeader{Type: LegacyType, ModTime: 1234, VersionID: [16]byte{1}}, xlMetaV2VersionHeader{Type: ObjectType, ModTime: 1234, VersionID: [16]byte{1}}},
+		{"delete marker", xlMetaV2VersionHeader{Type: LegacyType, ModTime: 1234}, xlMetaV2VersionHeader{Type: DeleteType, ModTime: 1234}},
+		{"incompatible erasure", xlMetaV2VersionHeader{Type: LegacyType, ModTime: 1234, EcN: 6, EcM: 6}, xlMetaV2VersionHeader{Type: ObjectType, ModTime: 1234, EcN: 8, EcM: 4}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.legacy.matchesNotStrict(tc.object) || tc.object.matchesNotStrict(tc.legacy) {
+				t.Fatal("incompatible versions matched")
+			}
+		})
+	}
+}
