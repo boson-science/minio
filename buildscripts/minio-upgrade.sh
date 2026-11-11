@@ -35,7 +35,25 @@ verify_checksum_mc() {
 }
 
 add_alias() {
-	local i
+	local i node id ip ready
+	# The 2019 readiness endpoint can return 200 before storage initializes.
+	# Check authenticated access to each backend, not just the nginx balance.
+	for node in minio1 minio2 minio3 minio4; do
+		id=$("${compose[@]}" ps -q "$node")
+		ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$id")
+		ready=false
+		for i in $(seq 1 60); do
+			if mc alias set "$node" "http://$ip:9000" minioadmin minioadmin && mc ls "$node/" >/dev/null; then
+				ready=true
+				break
+			fi
+			sleep 5
+		done
+		if [ "$ready" != true ]; then
+			echo "$node did not accept authenticated requests within five minutes" >&2
+			return 1
+		fi
+	done
 	for i in $(seq 1 60); do
 		if mc alias set minio http://127.0.0.1:9000 minioadmin minioadmin &&
 			curl -fsS --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null; then
@@ -66,7 +84,8 @@ make build
 cp ./minio "$work/image/minio"
 docker build -t "$new_image" "$work/image"
 
-MINIO_IMAGE="$old_image" "${compose[@]}" up -d
+export MINIO_IMAGE="$old_image"
+"${compose[@]}" up -d
 add_alias
 mc mb minio/minio-test/
 mc cp ./minio minio/minio-test/to-read/
@@ -87,9 +106,10 @@ if [ "$policy_ready" != true ]; then
 fi
 verify_checksum_mc ./minio minio/minio-test/to-read/minio
 old_sum=$(curl -fsS http://127.0.0.1:9000/minio-test/to-read/hosts | sha256sum)
-MINIO_IMAGE="$old_image" "${compose[@]}" stop
+"${compose[@]}" stop
 
-MINIO_IMAGE="$new_image" "${compose[@]}" up -d
+export MINIO_IMAGE="$new_image"
+"${compose[@]}" up -d
 add_alias
 echo 'Object listing immediately after upgrade:'
 mc ls --recursive --json minio/minio-test/ || true
