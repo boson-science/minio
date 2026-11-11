@@ -1949,6 +1949,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
+	trustedSSECReplica := false
 	if hasReplicationMetadata(r.Header) {
 		replMeta, s3Err := replicationMetadataAllowed(ctx, r, bucket, object)
 		if s3Err != ErrNone {
@@ -1957,6 +1958,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 		if replMeta {
 			extractReplicationMetadata(r.Header, metadata)
+			trustedSSECReplica = crypto.SSEC.IsEncrypted(metadata)
 		}
 	}
 	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
@@ -1970,11 +1972,14 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		defer globalReplicationStats.Load().UpdateReplicaStat(bucket, size)
 	}
 
-	// Check if bucket encryption is enabled
-	sseConfig, _ := globalBucketSSEConfigSys.Get(bucket)
-	sseConfig.Apply(r.Header, sse.ApplyOptions{
-		AutoEncrypt: globalAutoEncryption,
-	})
+	// Replicated SSE-C data is already encrypted. Applying the destination's
+	// default encryption would encrypt it a second time and break reads.
+	if !trustedSSECReplica {
+		sseConfig, _ := globalBucketSSEConfigSys.Get(bucket)
+		sseConfig.Apply(r.Header, sse.ApplyOptions{
+			AutoEncrypt: globalAutoEncryption,
+		})
+	}
 
 	var reader io.Reader
 	reader = rd
