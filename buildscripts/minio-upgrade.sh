@@ -138,3 +138,11 @@ new_sum=$(curl -fsS http://127.0.0.1:9000/minio-test/to-read/hosts | sha256sum)
 }
 verify_checksum_mc ./minio minio/minio-test/to-read/minio
 verify_checksum_mc /etc/hosts minio/minio-test/to-read/hosts
+
+# A load-balanced read can hide a backend-specific migration failure.
+# Check the same bytes through every server after healing.
+for node in minio1 minio2 minio3 minio4; do
+	echo "Verify healed objects through $node:"
+	verify_checksum_mc ./minio "$node/minio-test/to-read/minio"
+	verify_checksum_mc /etc/hosts "$node/minio-test/to-read/hosts"
+done
