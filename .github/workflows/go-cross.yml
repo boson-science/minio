@@ -25,6 +25,15 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           check-latest: true
+      # Validate the release Dockerfile's stage arguments and other build checks.
+      # The release job supplies its separately pinned base-image digests.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Check downstream release Dockerfile
+        run: |
+          docker buildx build --check \
+            --build-arg BUILD_BASE=golang:1.26.10-alpine \
+            --build-arg RUNTIME_BASE=registry.access.redhat.com/ubi9/ubi-micro \
+            -f Dockerfile.downstream .
       - name: Build on ${{ matrix.os }}
         if: matrix.os == 'ubuntu-latest'
         env:
