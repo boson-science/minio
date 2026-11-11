@@ -34,15 +34,15 @@ function start_minio_3_node() {
 		args="$args http://127.0.0.1:$((start_port + 1))${WORK_DIR}/1/${d}/ http://127.0.0.1:$((start_port + 2))${WORK_DIR}/2/${d}/ http://127.0.0.1:$((start_port + 3))${WORK_DIR}/3/${d}/ "
 	done
 
-	"${MINIO[@]}" --address ":$((start_port + 1))" $args >"${WORK_DIR}/dist-minio-server1.log" 2>&1 &
+	"${MINIO[@]}" --address ":$((start_port + 1))" --console-address ":$((start_port + 4))" $args >"${WORK_DIR}/dist-minio-server1.log" 2>&1 &
 	pid1=$!
 	disown ${pid1}
 
-	"${MINIO[@]}" --address ":$((start_port + 2))" $args >"${WORK_DIR}/dist-minio-server2.log" 2>&1 &
+	"${MINIO[@]}" --address ":$((start_port + 2))" --console-address ":$((start_port + 5))" $args >"${WORK_DIR}/dist-minio-server2.log" 2>&1 &
 	pid2=$!
 	disown $pid2
 
-	"${MINIO[@]}" --address ":$((start_port + 3))" $args >"${WORK_DIR}/dist-minio-server3.log" 2>&1 &
+	"${MINIO[@]}" --address ":$((start_port + 3))" --console-address ":$((start_port + 6))" $args >"${WORK_DIR}/dist-minio-server3.log" 2>&1 &
 	pid3=$!
 	disown $pid3
 
@@ -154,7 +154,7 @@ function perform_test() {
 
 function main() {
 	# use same ports for all tests
-	start_port=$(shuf -i 10000-65000 -n 1)
+	start_port=$(python3 buildscripts/find-healing-ports.py)
 
 	perform_test "2" ${start_port}
 	perform_test "1" ${start_port}
