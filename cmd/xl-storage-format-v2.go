@@ -266,11 +266,18 @@ func (x xlMetaV2VersionHeader) String() string {
 	)
 }
 
-// matchesNotStrict returns whether x and o have both have non-zero version,
-// their versions match and their type match.
-// If they have zero version, modtime must match.
+// matchesNotStrict compares version identities and compatible types. During
+// legacy migration, a legacy and a modern object can represent the same null
+// version. Null versions must also have matching modification times.
 func (x xlMetaV2VersionHeader) matchesNotStrict(o xlMetaV2VersionHeader) (ok bool) {
-	ok = x.VersionID == o.VersionID && x.Type == o.Type && x.matchesEC(o)
+	sameType := x.Type == o.Type
+	// Healing converts legacy objects in place. Count both representations
+	// together only for null versions; the modtime check below must still match.
+	if x.VersionID == [16]byte{} && o.VersionID == [16]byte{} &&
+		((x.Type == LegacyType && o.Type == ObjectType) || (x.Type == ObjectType && o.Type == LegacyType)) {
+		sameType = true
+	}
+	ok = x.VersionID == o.VersionID && sameType && x.matchesEC(o)
 	if x.VersionID == [16]byte{} {
 		ok = ok && o.ModTime == x.ModTime
 	}
