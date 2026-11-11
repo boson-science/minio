@@ -22,6 +22,8 @@ import (
 	"crypto/rand"
 	"io"
 	"testing"
+
+	"github.com/minio/minio/internal/bpool"
 )
 
 var erasureEncodeDecodeTests = []struct {
@@ -118,6 +120,11 @@ type erasureTestSetup struct {
 
 // Returns an initialized setup for erasure tests.
 func newErasureTestSetup(tb testing.TB, dataBlocks int, parityBlocks int, blockSize int64) (*erasureTestSetup, error) {
+	// Standalone erasure tests do not necessarily start a server first.
+	// Initialize the shared streaming buffer pool when no server has done so.
+	if globalBytePoolCap.Load() == nil {
+		globalBytePoolCap.CompareAndSwap(nil, bpool.NewBytePoolCap(256, blockSizeV2, blockSizeV2*2))
+	}
 	diskPaths := make([]string, dataBlocks+parityBlocks)
 	disks := make([]StorageAPI, len(diskPaths))
 	var err error
