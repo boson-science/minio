@@ -15,6 +15,11 @@ jobs:
   build:
     name: Go ${{ matrix.go-version }} on ${{ matrix.os }}
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+      GO111MODULE: on
+      MINIO_KMS_SECRET_KEY: "my-minio-key:oyArl7zlPECEduNbB1KXgdzDn2Bdpvvw0l8VO51HQnY="
+      MINIO_KMS_AUTO_ENCRYPTION: on
     strategy:
       matrix:
         go-version: [1.26.x]
@@ -27,17 +32,28 @@ jobs:
           check-latest: true
       - name: Build pinned test client
         uses: ./.github/actions/test-mc
-      - name: Build on ${{ matrix.os }}
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          CGO_ENABLED: 0
-          GO111MODULE: on
-          MINIO_KMS_SECRET_KEY: "my-minio-key:oyArl7zlPECEduNbB1KXgdzDn2Bdpvvw0l8VO51HQnY="
-          MINIO_KMS_AUTO_ENCRYPTION: on
+      - name: Enable IPv6
         run: |
           sudo sysctl net.ipv6.conf.all.disable_ipv6=0
           sudo sysctl net.ipv6.conf.default.disable_ipv6=0
-          make verify-healing
-          make verify-healing-inconsistent-versions
-          make verify-healing-with-root-disks
-          make verify-healing-with-rewrite
+      - name: Build race-enabled server
+        timeout-minutes: 30
+        run: make install-race
+      - name: Heal distributed drives
+        timeout-minutes: 35
+        run: env bash buildscripts/verify-healing.sh
+      - name: Heal empty erasure sets
+        timeout-minutes: 35
+        run: env bash buildscripts/verify-healing-empty-erasure-set.sh
+      - name: Heal inconsistent versions
+        timeout-minutes: 35
+        run: env bash buildscripts/heal-inconsistent-versions.sh
+      - name: Resolve inconsistent versions
+        timeout-minutes: 35
+        run: make verify-healing-inconsistent-versions
+      - name: Heal with root disks
+        timeout-minutes: 35
+        run: make verify-healing-with-root-disks
+      - name: Rewrite legacy metadata
+        timeout-minutes: 35
+        run: make verify-healing-with-rewrite
