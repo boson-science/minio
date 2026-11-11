@@ -19,7 +19,7 @@ case "$*" in
 *'/actions/runs '*)
 	conclusion=success
 	[[ "${TEST_CASE:-}" == codeql_failed ]] && conclusion=failure
-	printf '{"workflow_runs":[{"id":20,"name":"CodeQL","head_sha":"%s","created_at":"2026-01-01T00:00:00Z","status":"completed","conclusion":"%s"}]}\n' "$TEST_SHA" "$conclusion" ;;
+	printf '{"workflow_runs":[{"id":20,"name":"Push on master","path":"dynamic/github-code-scanning/codeql","head_sha":"%s","created_at":"2026-01-01T00:00:00Z","status":"completed","conclusion":"%s"}]}\n' "$TEST_SHA" "$conclusion" ;;
 *)
 	case "${TEST_CASE:-}:$*" in
 	missing:*go-cross.yml*) printf '%s\n' '{"workflow_runs":[]}' ;;

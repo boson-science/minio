@@ -30,7 +30,7 @@ printf 'vulncheck.yml: %s\n' "$result"
 [[ $result == completed:success ]] || exit 1
 
 codeql=$(gh api --method GET "repos/$repo/actions/runs" -f head_sha="$sha" -f per_page=100 |
-	jq -r --arg sha "$sha" '[.workflow_runs[] | select(.head_sha == $sha and .name == "CodeQL")] | sort_by(.created_at, .id) | last | if . == null then "missing" else "\(.id):\(.status):\(.conclusion // "pending")" end')
+	jq -r --arg sha "$sha" '[.workflow_runs[] | select(.head_sha == $sha and .path == "dynamic/github-code-scanning/codeql")] | sort_by(.created_at, .id) | last | if . == null then "missing" else "\(.id):\(.status):\(.conclusion // "pending")" end')
 printf 'CodeQL: %s\n' "$codeql"
 [[ $codeql =~ ^[0-9]+:completed:success$ ]] || exit 1
 run_id=${codeql%%:*}
