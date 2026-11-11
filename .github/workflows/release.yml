@@ -9,6 +9,7 @@ on:
     tags: ["RELEASE.*"]
 
 permissions:
+  actions: read
   contents: write
   packages: write
   id-token: write
@@ -42,6 +43,8 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Validate release and advisory gate
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           re='^RELEASE\.([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2})-([0-9]{2})-([0-9]{2})Z(\.hotfix\.[0-9a-f]{7,40})?$'
@@ -50,10 +53,12 @@ jobs:
           [[ "$GITHUB_REF_NAME" > "RELEASE.2025-10-15T17-29-55Z" ]]
           # Regular releases are cut from master; hotfixes from release/* branches.
           if [[ -z "${BASH_REMATCH[5]}" ]]; then
-            git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+            test "$GITHUB_SHA" = "$(git rev-parse origin/master)"
           else
             git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/release/'
           fi
+          bash buildscripts/tests/check-release-ci.sh
+          bash buildscripts/check-release-ci.sh "$GITHUB_SHA"
           test "$(jq '[.advisories[] | select(.status != "closed")] | length' security/advisory-matrix.json)" = 0
           # A closed advisory must name regression tests in this repository, and
           # every named test must exist and pass.
