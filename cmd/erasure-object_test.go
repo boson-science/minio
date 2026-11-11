@@ -1281,3 +1281,58 @@ func TestGetObjectWithOutdatedDisks(t *testing.T) {
 		}
 	}
 }
+
+// A partially healed legacy object can temporarily have both xl.json and
+// migrated xl.meta copies while other drives are reconnecting.
+func TestPickLatestQuorumFilesInfoMixedLegacyMigration(t *testing.T) {
+	legacy := getXLMetaBytes(1)
+	fi, err := getFileInfo(legacy, "bucket", "object", "", fileInfoOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi.DataDir = "00000000-0000-0000-0000-000000000001"
+	var migrated xlMetaV2
+	if err := migrated.AddVersion(fi); err != nil {
+		t.Fatal(err)
+	}
+	migratedRaw, err := migrated.AppendTo(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]RawFileInfo, 10)
+	errs := make([]error, 10)
+	for i := range raw {
+		switch {
+		case i < 3:
+			raw[i].Buf = append([]byte(nil), legacy...)
+		case i < 5:
+			raw[i].Buf = append([]byte(nil), migratedRaw...)
+		default:
+			errs[i] = errDiskNotFound
+		}
+	}
+	got, gotErrs := pickLatestQuorumFilesInfo(t.Context(), raw, errs, "bucket", "object", false, false)
+	readQuorum, _, err := objectQuorumFromMeta(t.Context(), got, gotErrs, 5)
+	if err != nil || readQuorum != 5 {
+		t.Fatalf("mixed legacy migration should retain read quorum: quorum=%d err=%v disk errors=%v", readQuorum, err, gotErrs)
+	}
+	if _, err := findFileInfoInQuorum(t.Context(), got, fi.ModTime, "", readQuorum); err != nil {
+		t.Fatalf("mixed legacy and migrated copies should resolve metadata quorum: %v", err)
+	}
+	// A delete marker must never be combined with legacy object data.
+	deleted := append([]FileInfo(nil), got...)
+	for i := 3; i < 5; i++ {
+		deleted[i].Deleted = true
+	}
+	if _, err := findFileInfoInQuorum(t.Context(), deleted, fi.ModTime, "", readQuorum); err == nil {
+		t.Fatal("legacy data and delete markers unexpectedly reached metadata quorum")
+	}
+	// Format differences alone are compatible; actual part mismatches are not.
+	for i := 3; i < 5; i++ {
+		got[i].Parts = append([]ObjectPartInfo(nil), got[i].Parts...)
+		got[i].Parts[0].Size++
+	}
+	if _, err := findFileInfoInQuorum(t.Context(), got, fi.ModTime, "", readQuorum); err == nil {
+		t.Fatal("different part sizes unexpectedly reached metadata quorum")
+	}
+}
