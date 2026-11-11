@@ -114,7 +114,10 @@ add_alias
 echo 'Object listing immediately after upgrade:'
 mc ls --recursive --json minio/minio-test/ || true
 mc stat minio/minio-test/to-read/minio || true
-mc admin heal --json -r minio/minio-test >/dev/null
+echo 'Verify both objects before healing:'
+verify_checksum_mc ./minio minio/minio-test/to-read/minio
+verify_checksum_mc /etc/hosts minio/minio-test/to-read/hosts
+mc admin heal --json -r minio/minio-test | tee "$work/heal.jsonl"
 new_sum=$(curl -fsS http://127.0.0.1:9000/minio-test/to-read/hosts | sha256sum)
 [[ $old_sum == "$new_sum" ]] || {
 	echo 'checksum mismatch after upgrade and heal' >&2
